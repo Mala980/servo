@@ -92,6 +92,7 @@ mod actors {
     pub mod watcher;
     pub mod worker;
 }
+mod cdp;
 mod id;
 mod network_handler;
 mod protocol;
@@ -171,6 +172,11 @@ struct DevtoolsInstance {
     /// Client threads remove their connection from here once they exit.
     #[conditional_malloc_size_of]
     connections: Arc<Mutex<FxHashMap<StreamId, DevtoolsConnection>>>,
+    /// The Chrome DevTools Protocol (CDP) server, enabled with the
+    /// `remote_debugging_enabled` preference. It receives a copy of every
+    /// event that flows through this instance.
+    #[conditional_malloc_size_of]
+    cdp: Option<cdp::CdpHandle>,
     next_resource_id: u64,
 }
 
@@ -180,38 +186,45 @@ impl DevtoolsInstance {
         receiver: Receiver<DevtoolsControlMsg>,
         embedder: EmbedderProxy,
     ) -> Option<Self> {
-        let address = if pref!(devtools_server_listen_address).is_empty() {
-            SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 7000)
-        } else if let Ok(addr) = SocketAddr::from_str(&pref!(devtools_server_listen_address)) {
-            addr
-        } else if let Ok(port) = pref!(devtools_server_listen_address).parse() {
-            SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), port)
+        // The Firefox remote debugging protocol server is only started when
+        // the devtools server is explicitly enabled; the Chrome DevTools
+        // Protocol server is started independently below.
+        let listener = if pref!(devtools_server_enabled) {
+            let address = if pref!(devtools_server_listen_address).is_empty() {
+                SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 7000)
+            } else if let Ok(addr) = SocketAddr::from_str(&pref!(devtools_server_listen_address)) {
+                addr
+            } else if let Ok(port) = pref!(devtools_server_listen_address).parse() {
+                SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), port)
+            } else {
+                SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 7000)
+            };
+            println!("Binding devtools to {address}");
+
+            let bound = TcpListener::bind(address).ok().and_then(|l| {
+                l.local_addr()
+                    .map(|addr| addr.port())
+                    .ok()
+                    .map(|port| (l, port))
+            });
+
+            // A token shared with the embedder to bypass permission prompt.
+            let port = if bound.is_some() {
+                Ok(address.port())
+            } else {
+                Err(())
+            };
+            let token = format!("{:X}", rng().next_u32());
+            embedder.send(EmbedderMsg::OnDevtoolsStarted(port, token.clone()));
+
+            match bound {
+                Some((l, _)) => Some(l),
+                None => {
+                    return None;
+                },
+            }
         } else {
-            SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 7000)
-        };
-        println!("Binding devtools to {address}");
-
-        let bound = TcpListener::bind(address).ok().and_then(|l| {
-            l.local_addr()
-                .map(|addr| addr.port())
-                .ok()
-                .map(|port| (l, port))
-        });
-
-        // A token shared with the embedder to bypass permission prompt.
-        let port = if bound.is_some() {
-            Ok(address.port())
-        } else {
-            Err(())
-        };
-        let token = format!("{:X}", rng().next_u32());
-        embedder.send(EmbedderMsg::OnDevtoolsStarted(port, token.clone()));
-
-        let listener = match bound {
-            Some((l, _)) => l,
-            None => {
-                return None;
-            },
+            None
         };
 
         // Create basic actors
@@ -228,27 +241,30 @@ impl DevtoolsInstance {
             actor_requests: HashMap::new(),
             actor_workers: FxHashMap::default(),
             connections: Default::default(),
+            cdp: cdp::start(),
             next_resource_id: 1,
         };
 
-        thread::Builder::new()
-            .name("DevtoolsCliAcceptor".to_owned())
-            .spawn(move || {
-                // accept connections and process them, spawning a new thread for each one
-                for stream in listener.incoming() {
-                    let mut stream = stream.expect("Can't retrieve stream");
-                    if !allow_devtools_client(&mut stream, &embedder, &token) {
-                        continue;
-                    };
-                    // connection succeeded and accepted
-                    sender
-                        .send(DevtoolsControlMsg::FromChrome(
-                            ChromeToDevtoolsControlMsg::AddClient(stream),
-                        ))
-                        .unwrap();
-                }
-            })
-            .expect("Thread spawning failed");
+        if let Some(listener) = listener {
+            thread::Builder::new()
+                .name("DevtoolsCliAcceptor".to_owned())
+                .spawn(move || {
+                    // accept connections and process them, spawning a new thread for each one
+                    for stream in listener.incoming() {
+                        let mut stream = stream.expect("Can't retrieve stream");
+                        if !allow_devtools_client(&mut stream, &embedder, &token) {
+                            continue;
+                        };
+                        // connection succeeded and accepted
+                        sender
+                            .send(DevtoolsControlMsg::FromChrome(
+                                ChromeToDevtoolsControlMsg::AddClient(stream),
+                            ))
+                            .unwrap();
+                    }
+                })
+                .expect("Thread spawning failed");
+        }
 
         Some(instance)
     }
@@ -257,6 +273,9 @@ impl DevtoolsInstance {
         let mut next_id = StreamId(0);
         while let Ok(msg) = self.receiver.recv() {
             trace!("{:?}", msg);
+            if let Some(cdp) = &self.cdp {
+                cdp.handle_control_msg(&msg);
+            }
             match msg {
                 DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::AddClient(stream)) => {
                     let id = next_id;

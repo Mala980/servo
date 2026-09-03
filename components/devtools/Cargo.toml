@@ -36,6 +36,7 @@ serde_json = { workspace = true }
 servo-base = { workspace = true }
 servo-config = { workspace = true }
 servo-url = { workspace = true }
+sha1 = { workspace = true }
 uuid = { workspace = true }
 
 [build-dependencies]

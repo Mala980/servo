@@ -10,6 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use euclid::{Angle, Length, Point2D, Rect, Rotation3D, Scale, Size2D, UnknownUnit, Vector3D};
 use keyboard_types::ShortcutMatcher;
@@ -45,6 +46,7 @@ use {
 
 use super::geometry::{winit_position_to_euclid_point, winit_size_to_euclid_size};
 use super::keyutils::{CMD_OR_ALT, keyboard_event_from_winit};
+use super::smooth_scrolling::SmoothScrollAnimator;
 use crate::desktop::accelerated_gl_media::setup_gl_accelerated_media;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::AppEvent;
@@ -101,6 +103,8 @@ pub struct HeadedWindow {
     visible_input_method: Cell<Option<EmbedderControlId>>,
     /// The position of the mouse cursor after the most recent `MouseMove` event.
     last_mouse_position: Cell<Option<Point2D<f32, DeviceIndependentPixel>>>,
+    /// Animates discrete mouse wheel scrolling (see [`SmoothScrollAnimator`]).
+    smooth_scroll_animator: RefCell<SmoothScrollAnimator>,
 }
 
 impl HeadedWindow {
@@ -214,11 +218,41 @@ impl HeadedWindow {
             dialogs: Default::default(),
             visible_input_method: Default::default(),
             last_mouse_position: Default::default(),
+            smooth_scroll_animator: Default::default(),
         })
     }
 
     pub(crate) fn winit_window(&self) -> &winit::window::Window {
         &self.winit_window
+    }
+
+    /// Advances the smooth scrolling animation by one frame, delivering the
+    /// next wheel delta chunk to web content.
+    fn pump_smooth_scroll_animation(&self, webview: &WebView) {
+        let chunk = self.smooth_scroll_animator.borrow_mut().tick(Instant::now());
+        if let Some(chunk) = chunk {
+            let point = self.webview_relative_mouse_point.get();
+            self.send_wheel_chunk(webview, chunk, point);
+            if self.smooth_scroll_animator.borrow().is_active() {
+                self.winit_window.request_redraw();
+            }
+        }
+    }
+
+    /// Delivers one animated wheel delta chunk to the web content.
+    fn send_wheel_chunk(
+        &self,
+        webview: &WebView,
+        chunk: (f64, f64),
+        point: Point2D<f32, DevicePixel>,
+    ) {
+        let delta = WheelDelta {
+            x: chunk.0,
+            y: chunk.1,
+            z: 0.0,
+            mode: WheelMode::DeltaPixel,
+        };
+        webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(delta, point.into())));
     }
 
     fn handle_keyboard_input(
@@ -542,6 +576,15 @@ impl HeadedWindow {
             gui.paint(&self.winit_window);
         }
 
+        // Drive the smooth scrolling animation: every redraw delivers the
+        // next chunk of the pending wheel delta to web content and schedules
+        // another redraw until the animation is finished.
+        if event == WindowEvent::RedrawRequested &&
+            let Some(webview) = window.active_webview()
+        {
+            self.pump_smooth_scroll_animation(&webview);
+        }
+
         if let WindowEvent::CursorMoved { position, .. } = event {
             self.last_mouse_position.set(Some(
                 winit_position_to_euclid_point(position).to_f32() / self.hidpi_scale_factor(),
@@ -664,29 +707,41 @@ impl HeadedWindow {
                     }
                 },
                 WindowEvent::MouseWheel { delta, .. } => {
-                    let (delta_x, delta_y, mode) = match delta {
-                        MouseScrollDelta::LineDelta(delta_x, delta_y) => (
-                            (delta_x * LINE_WIDTH) as f64,
-                            (delta_y * LINE_HEIGHT) as f64,
-                            WheelMode::DeltaPixel,
-                        ),
-                        MouseScrollDelta::PixelDelta(delta) => {
-                            (delta.x, delta.y, WheelMode::DeltaPixel)
-                        },
-                    };
-
-                    // Create wheel event before snapping to the major axis of movement
-                    let delta = WheelDelta {
-                        x: delta_x,
-                        y: delta_y,
-                        z: 0.0,
-                        mode,
-                    };
                     let point = self.webview_relative_mouse_point.get();
-                    webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
-                        delta,
-                        point.into(),
-                    )));
+                    match delta {
+                        MouseScrollDelta::LineDelta(delta_x, delta_y) => {
+                            // Discrete wheel notches are animated: the distance
+                            // is queued and delivered to the web content as a
+                            // series of pixel deltas over the next frames, which
+                            // makes scrolling feel smooth like in Chromium.
+                            let first_chunk = {
+                                let mut animator = self.smooth_scroll_animator.borrow_mut();
+                                animator.push(
+                                    f64::from(delta_x * LINE_WIDTH),
+                                    f64::from(delta_y * LINE_HEIGHT),
+                                );
+                                animator.tick(Instant::now())
+                            };
+                            if let Some(chunk) = first_chunk {
+                                self.send_wheel_chunk(&webview, chunk, point);
+                            }
+                            self.winit_window.request_redraw();
+                        },
+                        MouseScrollDelta::PixelDelta(delta) => {
+                            // High-resolution input (touchpads) is already
+                            // smooth, so it is forwarded unchanged.
+                            let delta = WheelDelta {
+                                x: delta.x,
+                                y: delta.y,
+                                z: 0.0,
+                                mode: WheelMode::DeltaPixel,
+                            };
+                            webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                                delta,
+                                point.into(),
+                            )));
+                        },
+                    }
                 },
                 WindowEvent::Touch(touch) => {
                     webview.notify_input_event(InputEvent::Touch(TouchEvent::new(

@@ -590,6 +590,15 @@ fn update_preferences_from_command_line_arguments(
         preferences.devtools_server_listen_address = listen_address.clone();
     }
 
+    if let Some(port) = cmd_args.remote_debugging_port {
+        preferences.remote_debugging_enabled = true;
+        let listen_address = cmd_args
+            .remote_debugging_listen_address
+            .clone()
+            .unwrap_or_else(|| String::from("127.0.0.1"));
+        preferences.remote_debugging_listen_address = format!("{listen_address}:{port}");
+    }
+
     if cmd_args.enable_experimental_web_platform_features {
         for pref in EXPERIMENTAL_PREFS {
             preferences.set_value(pref, PrefValue::Bool(true));
@@ -690,6 +699,19 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
     let mut preferences = get_preferences(&cmd_args.prefs_file, &config_dir);
 
     update_preferences_from_command_line_arguments(&mut preferences, &cmd_args);
+
+    // Enable the HTTP disk cache by default, storing cache entries in the
+    // config directory. This makes revisiting pages significantly faster and
+    // saves bandwidth, matching what other browsers do. An explicit value for
+    // the `network_http_disk_cache` preference is respected instead.
+    if preferences.network_http_disk_cache.is_empty() &&
+        let Some(ref config_dir) = config_dir
+    {
+        preferences.network_http_disk_cache = config_dir
+            .join("http_cache.sqlite3")
+            .to_string_lossy()
+            .into_owned();
+    }
 
     // FIXME: enable JIT compilation on 32-bit Android after the startup crash issue (#31134) is fixed.
     if cfg!(target_os = "android") && cfg!(target_pointer_width = "32") {

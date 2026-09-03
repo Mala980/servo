@@ -146,6 +146,11 @@ winit = { workspace = true }
 [target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "macos"))'.dependencies]
 signal-hook-registry = { workspace = true }
 
+# Enable the GStreamer media backend by default on desktop platforms so that
+# <audio> and <video> playback works out of the box, like in Chromium.
+[target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "macos", target_os = "windows"))'.dependencies]
+servo = { workspace = true, features = ["media-gstreamer"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 servo = { workspace = true, features = ["no-wgl"] }
 windows-sys = { workspace = true, features = ["Win32_Graphics_Gdi", "Win32_System_Console"] }

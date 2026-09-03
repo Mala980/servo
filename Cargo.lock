@@ -8326,6 +8326,7 @@ dependencies = [
  "servo-net-traits",
  "servo-profile-traits",
  "servo-url",
+ "sha1",
  "uuid",
 ]
 

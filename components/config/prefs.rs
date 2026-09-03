@@ -124,6 +124,13 @@ pub struct Preferences {
     pub devtools_server_enabled: bool,
     /// The address:port the devtools server listens to, default to 127.0.0.1:7000.
     pub devtools_server_listen_address: String,
+    /// Start the Chrome DevTools Protocol (CDP) remote debugging server at startup.
+    /// This is compatible with tooling that speaks CDP, like Chrome DevTools,
+    /// Puppeteer or Selenium.
+    pub remote_debugging_enabled: bool,
+    /// The address:port the CDP remote debugging server listens to, defaults
+    /// to 127.0.0.1:9222 (the same default port as Chromium).
+    pub remote_debugging_listen_address: String,
     // feature: WebGPU | #24706 | Web/API/WebGPU_API
     pub dom_webgpu_enabled: bool,
     /// List of comma-separated backends to be used by wgpu.
@@ -428,6 +435,8 @@ impl Preferences {
             editing_caret_blink_time: 600,
             devtools_server_enabled: false,
             devtools_server_listen_address: String::new(),
+            remote_debugging_enabled: false,
+            remote_debugging_listen_address: String::new(),
             dom_adoptedstylesheet_enabled: false,
             dom_allow_preloading_module_descendants: false,
             dom_allow_scripts_to_close_windows: false,

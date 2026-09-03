@@ -41,6 +41,11 @@ For more detailed build instructions, see the Servo Book under [Getting the Code
 - Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 - Restart your shell to make sure `cargo` is available
 - Install the other dependencies: `./mach bootstrap`
+- Install GStreamer (required for audio and video playback, which is enabled
+  by default on desktop builds):
+  - Debian, Ubuntu: `sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav`
+  - Fedora: `sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-libav`
+  - Arch: `sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav`
 - Build servoshell: `./mach build`
 
 ### Windows
@@ -89,3 +94,26 @@ For more detailed build instructions, see the Servo Book under [Getting the Code
   - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
 - Review the detailed instructions at [Building for OpenHarmony].
 - The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+
+## Remote debugging with the Chrome DevTools Protocol
+
+servoshell can expose the browser over the
+[Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+(CDP), the same protocol used by Chrome's remote debugging interface. Start it
+with:
+
+```sh
+./servo --remote-debugging-port 9222
+```
+
+servoshell then prints a `DevTools listening on ws://127.0.0.1:9222/...` line,
+answers the `/json/version` and `/json/list` HTTP discovery endpoints, and
+serves a WebSocket that speaks the `Browser`, `Target`, `Page`, `Runtime`,
+`Network`, `Log`, `Console`, `DOM`, `Emulation`, `Performance` and `Schema`
+domains (a subset of the methods; some are accepted as no-ops for
+compatibility). This makes it possible to automate Servo with tools like
+chrome-remote-interface, or to drive it from Selenium/Puppeteer-style clients
+that speak the flat CDP session protocol.
+
+To inspect a page with the Chrome DevTools frontend, open `chrome://inspect`
+in Chrome, choose "Configure…" and add `localhost:9222`.
