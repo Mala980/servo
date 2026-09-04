@@ -122,13 +122,17 @@ jobs:
       uploaded-artifact-name: ${{ inputs.profile }}-binary-linux-arm64
       profile: ${{ inputs.profile }}
       build-args: ${{ inputs.build-args }}
-      wpt: ${{ inputs.wpt }}
-      number-of-wpt-chunks: ${{ inputs.number-of-wpt-chunks }}
-      unit-tests: ${{ inputs.unit-tests }}
-      devtools-tests: ${{ inputs.devtools-tests }}
-      build-libservo: ${{ inputs.build-libservo }}
+      wpt: ${{ inputs.wpt == true || inputs.wpt == 'true' }}
+      # `workflow_dispatch` delivers number/boolean inputs as strings, which a
+      # reusable workflow's `type: number`/`type: boolean` inputs reject, so
+      # coerce them explicitly (this also covers the empty-string defaults
+      # that the dispatch API sends for untouched booleans).
+      number-of-wpt-chunks: ${{ fromJSON(inputs.number-of-wpt-chunks || '20') }}
+      unit-tests: ${{ inputs.unit-tests == true || inputs.unit-tests == 'true' }}
+      devtools-tests: ${{ inputs.devtools-tests == true || inputs.devtools-tests == 'true' }}
+      build-libservo: ${{ inputs.build-libservo == true || inputs.build-libservo == 'true' }}
       wpt-args: ${{ inputs.wpt-args }}
-      bencher: ${{ inputs.bencher }}
-      coverage: ${{ inputs.coverage }}
-      capi: ${{ inputs.capi }}
+      bencher: ${{ inputs.bencher == true || inputs.bencher == 'true' }}
+      coverage: ${{ inputs.coverage == true || inputs.coverage == 'true' }}
+      capi: ${{ inputs.capi == true || inputs.capi == 'true' }}
 
