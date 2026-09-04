@@ -131,6 +131,11 @@ pub struct Preferences {
     /// The address:port the CDP remote debugging server listens to, defaults
     /// to 127.0.0.1:9222 (the same default port as Chromium).
     pub remote_debugging_listen_address: String,
+    /// Expose `navigator.webdriver` as `true`. This is set automatically when
+    /// the WebDriver server is started, mirroring Chromium's
+    /// `--enable-automation` behavior. Like Chromium, `navigator.webdriver`
+    /// is always a boolean: it is `false` in a normal browsing session.
+    pub dom_webdriver_enabled: bool,
     // feature: WebGPU | #24706 | Web/API/WebGPU_API
     pub dom_webgpu_enabled: bool,
     /// List of comma-separated backends to be used by wgpu.
@@ -437,6 +442,7 @@ impl Preferences {
             devtools_server_listen_address: String::new(),
             remote_debugging_enabled: false,
             remote_debugging_listen_address: String::new(),
+            dom_webdriver_enabled: false,
             dom_adoptedstylesheet_enabled: false,
             dom_allow_preloading_module_descendants: false,
             dom_allow_scripts_to_close_windows: false,
@@ -671,39 +677,62 @@ impl UserAgentPlatform {
 }
 
 impl UserAgentPlatform {
+    /// The major version of Chromium that Servo claims to be in its default
+    /// user-agent string and related client hints. Claiming a modern
+    /// Chromium version prevents sites from treating Servo as a bot or an
+    /// unsupported browser. This only affects how Servo identifies itself;
+    /// `--user-agent` still overrides the whole user-agent string.
+    pub const CHROMIUM_MAJOR_VERSION: &'static str = "152";
+
     /// Convert this [`UserAgentPlatform`] into its corresponding `String` value, ie the
     /// default user-agent to use for this platform.
+    ///
+    /// The default user-agent is a Chromium-compatible one: most sites only
+    /// test for Chromium compatibility, and a user-agent that identifies the
+    /// engine as something else (or as an unknown engine) makes sites serve
+    /// degraded experiences or block the browser as a bot.
     pub fn to_user_agent_string(&self) -> String {
-        const SERVO_VERSION: &str = env!("CARGO_PKG_VERSION");
+        const CHROME_VERSION: &str = Self::CHROMIUM_MAJOR_VERSION;
         match self {
             UserAgentPlatform::Desktop
                 if cfg!(all(target_os = "windows", target_arch = "x86_64")) =>
             {
+                // Chrome on Windows always reports `Win64; x64` and
+                // `Windows NT 10.0`, regardless of the actual OS version
+                // (user-agent reduction).
                 format!(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; {ARCH}; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Desktop if cfg!(target_os = "macos") => {
+                // Chrome on macOS is frozen at `Intel Mac OS X 10_15_7`
+                // (user-agent reduction).
                 format!(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Desktop => {
                 format!(
-                    "Mozilla/5.0 (X11; Linux {ARCH}; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
+                    "Mozilla/5.0 (X11; Linux {ARCH}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Android => {
+                // `K` is the frozen device model of Chrome's user-agent
+                // reduction for Android.
                 format!(
-                    "Mozilla/5.0 (Android 10; Mobile; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
+                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Mobile Safari/537.36"
                 )
             },
             UserAgentPlatform::OpenHarmony => format!(
-                "Mozilla/5.0 (OpenHarmony; Mobile; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
+                "Mozilla/5.0 (Linux; OpenHarmony) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
             ),
-            UserAgentPlatform::Ios => format!(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X; rv:153.0) Servo/{SERVO_VERSION} Firefox/153.0"
-            ),
+            UserAgentPlatform::Ios => {
+                // Chrome on iOS reports itself as CriOS with the WebKit
+                // version that the system WebView uses.
+                format!(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/{CHROME_VERSION}.0.0.0 Mobile/15E148 Safari/604.1"
+                )
+            },
         }
     }
 }

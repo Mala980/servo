@@ -157,6 +157,41 @@ pub enum WebDriverCommandMsg {
     ResetAllCookies(Sender<()>),
 }
 
+impl WebDriverCommandMsg {
+    /// The [`WebViewId`] this command targets, when the command is scoped to
+    /// a particular webview. Commands that create new webviews or that are
+    /// not scoped to a webview return `None`.
+    pub fn webview_id(&self) -> Option<WebViewId> {
+        match self {
+            WebDriverCommandMsg::GetWindowRect(webview_id, _) |
+            WebDriverCommandMsg::GetViewportSize(webview_id, _) |
+            WebDriverCommandMsg::LoadUrl(webview_id, _, _) |
+            WebDriverCommandMsg::Refresh(webview_id, _) |
+            WebDriverCommandMsg::GoBack(webview_id, _) |
+            WebDriverCommandMsg::GoForward(webview_id, _) |
+            WebDriverCommandMsg::InputEvent(webview_id, _, _) |
+            WebDriverCommandMsg::SetWindowRect(webview_id, _, _) |
+            WebDriverCommandMsg::MaximizeWebView(webview_id, _) |
+            WebDriverCommandMsg::TakeScreenshot(webview_id, _, _) |
+            WebDriverCommandMsg::CloseWebView(webview_id, _) |
+            WebDriverCommandMsg::FocusWebView(webview_id) |
+            WebDriverCommandMsg::IsWebViewOpen(webview_id, _) |
+            WebDriverCommandMsg::CurrentUserPrompt(webview_id, _) |
+            WebDriverCommandMsg::HandleUserPrompt(webview_id, _, _) |
+            WebDriverCommandMsg::GetAlertText(webview_id, _) |
+            WebDriverCommandMsg::SendAlertText(webview_id, _) => Some(*webview_id),
+            WebDriverCommandMsg::ScriptCommand(_, _) |
+            WebDriverCommandMsg::NewWindow(_, _, _) |
+            WebDriverCommandMsg::GetFocusedWebView(_) |
+            WebDriverCommandMsg::GetAllWebViews(_) |
+            WebDriverCommandMsg::IsBrowsingContextOpen(_, _) |
+            WebDriverCommandMsg::FocusBrowsingContext(_) |
+            WebDriverCommandMsg::Shutdown |
+            WebDriverCommandMsg::ResetAllCookies(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub enum WebDriverScriptCommand {
     AddCookie(

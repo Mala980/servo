@@ -8308,8 +8308,10 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "crossbeam-channel",
+ "euclid",
  "headers",
  "http",
+ "image",
  "log",
  "malloc_size_of_derive",
  "parking_lot",
@@ -8327,6 +8329,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-url",
  "sha1",
+ "stylo_traits",
  "uuid",
 ]
 

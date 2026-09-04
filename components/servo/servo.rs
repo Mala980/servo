@@ -261,6 +261,16 @@ impl ServoInner {
             .and_then(WebView::from_weak_handle)
     }
 
+    /// Returns any live webview handle, used to route messages that are not
+    /// scoped to a particular webview (like automation commands that create
+    /// new webviews).
+    fn any_webview_handle(&self) -> Option<WebView> {
+        self.webviews
+            .borrow()
+            .values()
+            .find_map(WebView::from_weak_handle)
+    }
+
     #[servo_tracing::instrument(level = "debug", skip_all)]
     fn spin_event_loop(&self) -> bool {
         if self.shutdown_state.get() == ShutdownState::FinishedShuttingDown {
@@ -764,6 +774,22 @@ impl ServoInner {
             EmbedderMsg::AccessibilityTreeUpdate(webview_id, tree_update, epoch) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.process_accessibility_tree_update(tree_update, epoch);
+                }
+            },
+            EmbedderMsg::WebDriverCommand(command) => {
+                // Automation commands (from the WebDriver or Chrome DevTools
+                // Protocol servers) are handled by the embedder, which owns
+                // the browser chrome. Route them through any live webview's
+                // delegate; the command itself carries its own target when
+                // one exists.
+                let target_webview = command
+                    .webview_id()
+                    .and_then(|webview_id| self.get_webview_handle(webview_id))
+                    .or_else(|| self.any_webview_handle());
+                if let Some(webview) = target_webview {
+                    webview.delegate().handle_webdriver_command(webview, command);
+                } else {
+                    warn!("Dropping automation command because no webview is open");
                 }
             },
         }

@@ -190,7 +190,10 @@ pub(crate) fn set_default_accept(request: &mut Request) {
                 DOCUMENT_ACCEPT_HEADER_VALUE
             },
             Destination::Image => {
-                HeaderValue::from_static("image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5")
+                // Chromium's `Accept` for image subresources, minus
+                // `image/avif`, which Servo cannot decode: advertising it
+                // would make sites send images that cannot be displayed.
+                HeaderValue::from_static("image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
             },
             Destination::Json => HeaderValue::from_static("application/json,*/*;q=0.5"),
             Destination::Style => HeaderValue::from_static("text/css,*/*;q=0.1"),
@@ -1478,6 +1481,8 @@ async fn http_network_or_cache_fetch(
 
     // Step 8.13 Append the Fetch metadata headers for httpRequest.
     append_the_fetch_metadata_headers(http_request);
+
+    append_client_hint_headers(http_request, &context.user_agent);
 
     // Step 8.14: If httpRequest’s initiator is "prefetch", then set a structured field value given
     // (`Sec-Purpose`, the token "prefetch") in httpRequest’s header list.
@@ -2817,11 +2822,6 @@ fn append_a_request_origin_header(request: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-append-the-fetch-metadata-headers-for-a-request>
 fn append_the_fetch_metadata_headers(r: &mut Request) {
-    // Step 1. If r’s url is not an potentially trustworthy URL, return.
-    if !r.url().is_potentially_trustworthy() {
-        return;
-    }
-
     // Step 2. Set the Sec-Fetch-Dest header for r.
     set_the_sec_fetch_dest_header(r);
 
@@ -2833,6 +2833,58 @@ fn append_the_fetch_metadata_headers(r: &mut Request) {
 
     // Step 5. Set the Sec-Fetch-User header for r.
     set_the_sec_fetch_user_header(r);
+}
+
+/// Chromium sends a default set of client hint headers with every navigation
+/// request (`Sec-CH-UA`, `Sec-CH-UA-Mobile` and `Sec-CH-UA-Platform`). Sites
+/// use their presence to detect bots, so mirror them here. The brand version
+/// is derived from the `Chrome/` token of the user-agent string to keep the
+/// two consistent, and the hints are skipped if the user-agent does not
+/// identify as Chromium.
+fn append_client_hint_headers(request: &mut Request, user_agent: &str) {
+    if request.mode != RequestMode::Navigate {
+        return;
+    }
+
+    let chrome_version = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|version| version.parse::<u32>().ok());
+    let Some(chrome_version) = chrome_version else {
+        return;
+    };
+
+    if request.headers.contains_key("Sec-CH-UA") {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "\"Chromium\";v=\"{chrome_version}\", \"Google Chrome\";v=\"{chrome_version}\", \"Not?A_Brand\";v=\"99\""
+    )) {
+        request.headers.insert("Sec-CH-UA", value);
+    }
+
+    if !request.headers.contains_key("Sec-CH-UA-Mobile") {
+        let mobile = if cfg!(target_os = "android") { "?1" } else { "?0" };
+        request.headers.insert("Sec-CH-UA-Mobile", HeaderValue::from_static(mobile));
+    }
+
+    if !request.headers.contains_key("Sec-CH-UA-Platform") {
+        let platform = if cfg!(target_os = "windows") {
+            "Windows"
+        } else if cfg!(target_os = "macos") {
+            "macOS"
+        } else if cfg!(any(target_os = "android")) {
+            "Android"
+        } else if cfg!(target_os = "ios") {
+            "iOS"
+        } else {
+            "Linux"
+        };
+        if let Ok(value) = HeaderValue::from_str(&format!("\"{platform}\"")) {
+            request.headers.insert("Sec-CH-UA-Platform", value);
+        }
+    }
 }
 
 /// Steps 8.16 to 8.18 in [HTTP network or cache fetch](https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch)
@@ -2883,9 +2935,6 @@ fn append_cache_data_to_headers(http_request: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-dest>
 fn set_the_sec_fetch_dest_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
-
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. If r’s destination is the empty string, set header’s value to the string "empty".
     // Otherwise, set header’s value to r’s destination.
@@ -2897,9 +2946,6 @@ fn set_the_sec_fetch_dest_header(r: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-mode>
 fn set_the_sec_fetch_mode_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
-
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. Set header’s value to r’s mode.
     let header = &r.mode;
@@ -2915,9 +2961,6 @@ fn set_the_sec_fetch_site_header(r: &mut Request) {
     let Origin::Origin(request_origin) = &r.origin else {
         panic!("request origin cannot be \"client\" at this point")
     };
-
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
 
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. Set header’s value to same-origin.
@@ -2953,9 +2996,6 @@ fn set_the_sec_fetch_site_header(r: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-user>
 fn set_the_sec_fetch_user_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
-
     // Step 2. If r is not a navigation request, or if r’s user-activation is false, return.
     // TODO user activation
     if !r.is_navigation_request() {

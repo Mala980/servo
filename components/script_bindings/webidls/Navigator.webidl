@@ -67,6 +67,11 @@ partial interface Navigator {
   [Pref="dom_permissions_enabled"] readonly attribute Permissions permissions;
 };
 
+// https://w3c.github.io/webdriver/#dfn-webdriver
+partial interface Navigator {
+  readonly attribute boolean webdriver;
+};
+
 // https://html.spec.whatwg.org/multipage/#navigatorconcurrenthardware
 interface mixin NavigatorConcurrentHardware {
   readonly attribute unsigned long long hardwareConcurrency;

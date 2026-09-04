@@ -95,7 +95,12 @@ impl WorkerNavigatorMethods<crate::DomTypeHolder> for WorkerNavigator {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-appversion>
     fn AppVersion(&self) -> DOMString {
-        navigatorinfo::AppVersion()
+        navigatorinfo::AppVersion(&pref!(user_agent))
+    }
+
+    /// <https://w3c.github.io/webdriver/#dfn-webdriver>
+    fn Webdriver(&self) -> bool {
+        pref!(dom_webdriver_enabled)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#navigatorlanguage>

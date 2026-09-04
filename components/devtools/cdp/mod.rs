@@ -32,6 +32,7 @@ use devtools_traits::{
     DevtoolsPageInfo, NavigationState, NetworkEvent, ScriptToDevtoolsControlMsg, WorkerId,
     get_time_stamp,
 };
+use embedder_traits::EmbedderProxy;
 use log::{debug, info, warn};
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
@@ -67,7 +68,7 @@ impl CdpHandle {
 /// Starts the CDP server if the `remote_debugging_enabled` preference is set.
 /// Returns a handle for feeding browser events into the server, or `None`
 /// when the server is disabled or could not be started.
-pub(crate) fn start() -> Option<CdpHandle> {
+pub(crate) fn start(embedder: EmbedderProxy) -> Option<CdpHandle> {
     if !pref!(remote_debugging_enabled) {
         return None;
     }
@@ -90,6 +91,7 @@ pub(crate) fn start() -> Option<CdpHandle> {
     info!("CDP server listening on {actual_address}");
 
     let server = Arc::new(Mutex::new(CdpServer::new(
+        embedder,
         web_socket_debugger_url,
         browser_id,
     )));
@@ -99,6 +101,18 @@ pub(crate) fn start() -> Option<CdpHandle> {
         .expect("Thread spawning failed");
 
     Some(CdpHandle(server))
+}
+
+/// Extracts the Chromium major version from the `Chrome/` token of a
+/// user-agent string, falling back to "0" when the user-agent does not
+/// identify as Chromium. Used to keep CDP version reporting consistent
+/// with the user-agent.
+pub(crate) fn chrome_major_version(user_agent: &str) -> &str {
+    user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .unwrap_or("0")
 }
 
 /// Resolves the listen address preference, which accepts either an
@@ -314,6 +328,27 @@ struct DomNodeRef {
     unique_id: String,
 }
 
+/// The maximum number of bytes of a response body that is kept in memory for
+/// `Network.getResponseBody`. Larger bodies are dropped.
+const MAX_CAPTURED_BODY_SIZE: usize = 20 * 1024 * 1024;
+
+/// The maximum number of finished network requests to remember. Oldest
+/// entries are dropped beyond this, mirroring how the Chrome DevTools
+/// frontend keeps a bounded buffer.
+const MAX_REMEMBERED_NETWORK_REQUESTS: usize = 500;
+
+/// The state of a network request that is in flight, used to correlate
+/// request and response events.
+struct NetworkRequestState {
+    browsing_context_id: BrowsingContextId,
+    url: String,
+    finished: bool,
+    /// The response body, when the fetch layer captured one for devtools.
+    body: Option<Vec<u8>>,
+    /// The MIME type of the response, from the `Content-Type` header.
+    mime_type: String,
+}
+
 /// The CDP server state. All access happens behind the mutex inside
 /// [`CdpHandle`] or the acceptor thread.
 pub(crate) struct CdpServer {
@@ -333,15 +368,26 @@ pub(crate) struct CdpServer {
     pipelines: FxHashMap<PipelineId, CdpPipeline>,
     network_requests: FxHashMap<String, NetworkRequestState>,
     dom_nodes: FxHashMap<i64, DomNodeRef>,
+    /// WebViews that were created through `Target.createTarget` but whose
+    /// browsing context has not been observed yet. Maps the webview id to
+    /// the target id string that was already handed out to the client.
+    pending_targets: FxHashMap<WebViewId, String>,
     /// Messages queued for delivery to connections, flushed at the end of
     /// each entry point to keep mutex critical sections free of I/O.
     outbox: Vec<(u64, Value)>,
+    /// Handle to the embedder, used to run browser-level automation
+    /// commands (screenshots, creating and closing webviews, focusing).
+    embedder: EmbedderProxy,
     web_socket_debugger_url: String,
     browser_id: String,
 }
 
 impl CdpServer {
-    fn new(web_socket_debugger_url: String, browser_id: String) -> Self {
+    fn new(
+        embedder: EmbedderProxy,
+        web_socket_debugger_url: String,
+        browser_id: String,
+    ) -> Self {
         Self {
             started_at: Instant::now(),
             next_connection_id: 0,
@@ -356,7 +402,9 @@ impl CdpServer {
             pipelines: FxHashMap::default(),
             network_requests: FxHashMap::default(),
             dom_nodes: FxHashMap::default(),
+            pending_targets: FxHashMap::default(),
             outbox: Vec::new(),
+            embedder,
             web_socket_debugger_url,
             browser_id,
         }
@@ -519,6 +567,9 @@ impl CdpServer {
         let execution_context_id = self.next_execution_context_id;
         self.next_execution_context_id += 1;
 
+        // A target id may have been pre-assigned by `Target.createTarget`,
+        // which hands the string out before the browsing context exists.
+        let pre_assigned_target_id = self.pending_targets.remove(&webview_id);
         let previous_pipeline = if let Some(target) = self.targets.get_mut(&browsing_context_id) {
             let previous = target.current_pipeline;
             target.current_pipeline = Some(pipeline_id);
@@ -526,8 +577,11 @@ impl CdpServer {
             target.url = page_info.url.to_string();
             previous
         } else {
-            let target_id_string = format!("page-{}", self.next_target_number);
-            self.next_target_number += 1;
+            let target_id_string = pre_assigned_target_id.unwrap_or_else(|| {
+                let target_id_string = format!("page-{}", self.next_target_number);
+                self.next_target_number += 1;
+                target_id_string
+            });
             self.target_ids
                 .insert(target_id_string.clone(), browsing_context_id);
             self.targets.insert(
@@ -821,6 +875,8 @@ impl CdpServer {
                         browsing_context_id,
                         url: url.clone(),
                         finished: false,
+                        body: None,
+                        mime_type: String::new(),
                     },
                 );
                 self.send_to_target_sessions(
@@ -867,6 +923,29 @@ impl CdpServer {
                     .get(&browsing_context_id)
                     .map(|target| target.target_id_string.clone())
                     .unwrap_or_default();
+
+                // Keep the body (up to a limit) so that
+                // `Network.getResponseBody` can serve it later.
+                state.body = http_response
+                    .body
+                    .as_ref()
+                    .filter(|body| body.len() <= MAX_CAPTURED_BODY_SIZE)
+                    .map(|body| body.to_vec());
+                state.mime_type = mime_type.clone();
+
+                // Prune old finished requests to keep memory bounded.
+                if self.network_requests.len() > MAX_REMEMBERED_NETWORK_REQUESTS * 2 {
+                    let finished_ids: Vec<String> = self
+                        .network_requests
+                        .iter()
+                        .filter(|(_, request)| request.finished)
+                        .take(self.network_requests.len() - MAX_REMEMBERED_NETWORK_REQUESTS)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in finished_ids {
+                        self.network_requests.remove(&id);
+                    }
+                }
 
                 self.send_to_target_sessions(
                     browsing_context_id,
@@ -993,13 +1072,14 @@ impl CdpServer {
     /// The `Browser.getVersion` reply payload as a JSON string.
     fn version_json(&self, host: &str) -> String {
         let user_agent = pref!(user_agent);
+        let chrome_version = chrome_major_version(&user_agent);
         json!({
-            "Browser": format!("Servo/{}", env!("CARGO_PKG_VERSION")),
+            "Browser": format!("Chrome/{chrome_version}.0.0.0"),
             "Protocol-Version": "1.3",
             "User-Agent": user_agent,
-            "V8-Version": "0.0.0",
-            "WebKit-Version": "0.0.0",
-            "jsVersion": "0.0.0",
+            "V8-Version": format!("{chrome_version}.0.0.0"),
+            "WebKit-Version": "537.36 (@0)",
+            "jsVersion": format!("{chrome_version}.0.0.0"),
             "webSocketDebuggerUrl": self.web_socket_debugger_url,
             "host": host,
         })

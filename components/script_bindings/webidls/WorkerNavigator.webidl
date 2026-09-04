@@ -17,3 +17,7 @@ partial interface WorkerNavigator {
   [Pref="dom_permissions_enabled"] readonly attribute Permissions permissions;
 };
 
+// https://w3c.github.io/webdriver/#dfn-webdriver
+partial interface WorkerNavigator {
+  readonly attribute boolean webdriver;
+};

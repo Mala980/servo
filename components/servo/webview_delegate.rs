@@ -12,7 +12,7 @@ use embedder_traits::{
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
     NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
     SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg, WebDriverCommandMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -960,6 +960,13 @@ pub trait WebViewDelegate {
     /// responsibility to remove the [`WebView`] from the interface when this notification
     /// occurs.
     fn notify_closed(&self, _webview: WebView) {}
+
+    /// A browser-level automation command (from the WebDriver server or the
+    /// Chrome DevTools Protocol server) should be run. Commands that only
+    /// touch web contents are handled by Servo itself; commands that touch
+    /// browser chrome (taking screenshots, creating or closing [`WebView`]s,
+    /// focusing) are the responsibility of the embedder.
+    fn handle_webdriver_command(&self, _webview: WebView, _command: WebDriverCommandMsg) {}
 
     /// An input event passed to this [`WebView`] via [`WebView::notify_input_event`] has been handled
     /// by Servo. This allows post-procesing of input events, such as chaining up unhandled events

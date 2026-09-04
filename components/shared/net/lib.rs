@@ -62,9 +62,13 @@ pub use resource_fetch_timing::{
     ResourceFetchTimingContainer, ResourceTimeValue, ResourceTimingType,
 };
 
+/// The `Accept` header value that Chromium sends for document (navigation)
+/// requests. Sites check the shape of this header, and a non-Chromium
+/// value is a bot signal.
 /// <https://fetch.spec.whatwg.org/#document-accept-header-value>
-pub const DOCUMENT_ACCEPT_HEADER_VALUE: HeaderValue =
-    HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+pub const DOCUMENT_ACCEPT_HEADER_VALUE: HeaderValue = HeaderValue::from_static(
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+);
 
 /// An implementation of the [Fetch specification](https://fetch.spec.whatwg.org/)
 pub mod fetch {
@@ -1299,9 +1303,16 @@ pub fn get_current_locale() -> &'static (String, HeaderValue) {
         } else {
             locale_override
         };
-        let header_value = HeaderValue::from_str(&locale)
+        // Shape the value like Chromium does for the first two entries of its
+        // `Accept-Language` header: the full locale, then its primary
+        // subtag with a quality factor (e.g. `en-US,en;q=0.9`).
+        let chromium_shaped = match locale.split_once('-') {
+            Some((primary_subtag, _)) => format!("{locale},{primary_subtag};q=0.9"),
+            None => locale.clone(),
+        };
+        let header_value = HeaderValue::from_str(&chromium_shaped)
             .ok()
-            .unwrap_or_else(|| HeaderValue::from_static("en-US"));
+            .unwrap_or_else(|| HeaderValue::from_static("en-US,en;q=0.9"));
         (locale, header_value)
     })
 }
@@ -1314,7 +1325,6 @@ pub fn set_default_accept_language(headers: &mut HeaderMap) {
         return;
     }
 
-    // To reduce fingerprinting we set only a single language.
     headers.insert(header::ACCEPT_LANGUAGE, get_current_locale().1.clone());
 }
 

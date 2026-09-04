@@ -231,6 +231,10 @@ impl DevtoolsInstance {
         let mut registry = ActorRegistry::default();
         RootActor::register(&mut registry);
 
+        // The Chrome DevTools Protocol server gets a handle to the embedder
+        // so that it can run browser-level automation commands (screenshots,
+        // creating and closing webviews, focusing).
+        let cdp = cdp::start(embedder.clone());
         let instance = Self {
             registry: Arc::new(registry),
             id_map: Arc::new(Mutex::new(IdMap::default())),
@@ -241,7 +245,7 @@ impl DevtoolsInstance {
             actor_requests: HashMap::new(),
             actor_workers: FxHashMap::default(),
             connections: Default::default(),
-            cdp: cdp::start(),
+            cdp,
             next_resource_id: 1,
         };
 

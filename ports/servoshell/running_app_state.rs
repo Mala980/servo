@@ -710,6 +710,14 @@ impl WebViewDelegate for RunningAppState {
         Some(self.platform_window_for_webview(&webview).screen_geometry())
     }
 
+    fn handle_webdriver_command(&self, _webview: WebView, command: WebDriverCommandMsg) {
+        // Automation commands arriving through the embedder (currently the
+        // Chrome DevTools Protocol server) are handled exactly like the ones
+        // from the WebDriver server. They never create new windows, so no
+        // platform window factory is needed.
+        self.handle_webdriver_command(command, None);
+    }
+
     fn notify_status_text_changed(&self, webview: WebView, _status: Option<String>) {
         self.window_for_webview(&webview).set_needs_update();
     }

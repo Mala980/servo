@@ -6,7 +6,15 @@
 //! [`CdpServer`]. Commands are addressed either to the browser (no session)
 //! or to a session created with `Target.attachToTarget`.
 
+use std::io::Cursor;
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use devtools_traits::{DevtoolScriptControlMsg, EvaluateJSReply, NodeInfo};
+use embedder_traits::WebDriverCommandMsg;
+use euclid::Rect;
+use image::{DynamicImage, ImageFormat};
 use serde_json::{Value, json};
 use servo_base::generic_channel;
 use servo_base::id::PipelineId;
@@ -15,7 +23,11 @@ use servo_url::ServoUrl;
 
 use super::origin_of;
 use crate::cdp::protocol::{CdpError, event, evaluate_reply_to_remote_object};
-use crate::cdp::{CdpServer, DomNodeRef, EVALUATE_TIMEOUT};
+use crate::cdp::{CdpServer, DomNodeRef, EVALUATE_TIMEOUT, chrome_major_version};
+
+/// How long to wait for the embedder to run a browser-level automation
+/// command (like taking a screenshot) before giving up.
+const AUTOMATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Methods of the `Emulation` domain that are accepted as no-ops so that
 /// clients observe Chrome-like behavior.
@@ -29,6 +41,38 @@ const EMULATION_NOOP_METHODS: &[&str] = &[
     "Emulation.setScrollbarsHidden",
     "Emulation.setCPUThrottlingRate",
     "Emulation.setAutoDarkModeOverride",
+    "Emulation.setLocaleOverride",
+    "Emulation.setTimezoneOverride",
+    "Emulation.setVirtualTimePolicy",
+    "Emulation.setAutomationOverride",
+];
+
+/// Methods that are accepted as no-ops, either because Servo already behaves
+/// the way the method asks for or because the behavior cannot be changed at
+/// runtime. Accepted for client compatibility.
+const SESSION_NOOP_METHODS: &[&str] = &[
+    "Page.setLifecycleEventsEnabled",
+    "Page.setBypassCSP",
+    "Page.setInterceptFileChooserDialog",
+    "Page.setAdBlockingEnabled",
+    "Page.setDownloadBehavior",
+    "Runtime.setAsyncCallStackDepth",
+    "Runtime.setMaxCallStackSizeToCapture",
+    "Network.setBypassServiceWorker",
+    "Network.setCacheDisabled",
+    "Network.setAttachDebugStack",
+    "Network.setUserAgentOverride",
+    "Network.setAcceptedEncodings",
+    "Network.clearAcceptedEncodingsOverride",
+    "Network.addInterception",
+    "Network.removeInterception",
+    "Network.continueInterceptedRequest",
+    "Log.startViolationsReport",
+    "Log.stopViolationsReport",
+    "DOM.setInspectedNode",
+    "DOM.discardSearchResults",
+    "Performance.setTime",
+    "Performance.setTimezone",
 ];
 
 impl CdpServer {
@@ -119,15 +163,19 @@ impl CdpServer {
             "Browser.getVersion" => {
                 let Some(id) = id else { return };
                 let user_agent = pref!(user_agent);
+                // Report a Chromium product and a plausible V8 version so
+                // that clients do not flag the browser as unsupported. The
+                // version comes from the `Chrome/` token of the user-agent.
+                let chrome_version = chrome_major_version(&user_agent);
                 self.send_reply_to_connection(
                     connection_id,
                     id,
                     json!({
                         "protocolVersion": "1.3",
-                        "product": format!("Servo/{}", env!("CARGO_PKG_VERSION")),
-                        "revision": "@unknown",
+                        "product": format!("Chrome/{chrome_version}.0.0.0"),
+                        "revision": format!("@{chrome_version}"),
                         "userAgent": user_agent,
-                        "jsVersion": "0.0.0",
+                        "jsVersion": format!("{chrome_version}.0.0.0"),
                     }),
                 );
             },
@@ -152,6 +200,16 @@ impl CdpServer {
                             "height": 0,
                             "windowState": "normal",
                         },
+                    }),
+                );
+            },
+            "Browser.getProcessMetrics" => {
+                let Some(id) = id else { return };
+                self.send_reply_to_connection(
+                    connection_id,
+                    id,
+                    json!({
+                        "processMetrics": [],
                     }),
                 );
             },
@@ -265,13 +323,151 @@ impl CdpServer {
                 }
                 self.send_reply_to_connection(connection_id, id, json!({}));
             },
-            "Target.createTarget" | "Target.closeTarget" | "Target.exposeDevToolsProtocol" => {
+            "Target.createTarget" => {
                 let Some(id) = id else { return };
-                self.send_error_to_connection(
+                let url = params
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("about:blank");
+                let Ok(url) = ServoUrl::parse(url) else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::invalid_params("invalid 'url' parameter"),
+                    );
+                    return;
+                };
+                // Open a new tab through the embedder. The reply carries the
+                // id of the new webview; the same id is used as the CDP
+                // target id once the browsing context shows up.
+                let Ok(Some((webview_id_sender, webview_id_receiver))) =
+                    generic_channel::oneshot::<servo_base::id::WebViewId>()
+                else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::server("Could not create a channel for the new target"),
+                    );
+                    return;
+                };
+                self.embedder
+                    .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                        WebDriverCommandMsg::NewWindow(
+                            embedder_traits::NewWindowTypeHint::Tab,
+                            webview_id_sender,
+                            None,
+                        ),
+                    ));
+                let Ok(webview_id) = webview_id_receiver.recv() else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::server("The embedder refused to create a new target"),
+                    );
+                    return;
+                };
+                let target_id_string = format!("page-{}", self.next_target_number);
+                self.next_target_number += 1;
+                self.pending_targets.insert(webview_id, target_id_string.clone());
+                self.send_reply_to_connection(
                     connection_id,
                     id,
-                    CdpError::server(format!("{method} is not supported by Servo")),
+                    json!({ "targetId": target_id_string }),
                 );
+            },
+            "Target.closeTarget" => {
+                let Some(id) = id else { return };
+                let Some(webview_id) = params
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .and_then(|target_id| {
+                        self.targets
+                            .values()
+                            .find(|target| target.target_id_string == target_id)
+                            .map(|target| target.webview_id)
+                    })
+                    .or_else(|| {
+                        // The target may still be pending creation.
+                        params
+                            .get("targetId")
+                            .and_then(Value::as_str)
+                            .and_then(|target_id| {
+                                self.pending_targets
+                                    .iter()
+                                    .find(|(_, pending_id)| *pending_id == target_id)
+                                    .map(|(webview_id, _)| *webview_id)
+                            })
+                    })
+                else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::server("No target with given id found"),
+                    );
+                    return;
+                };
+                let Ok(Some((close_ack_sender, close_ack_receiver))) =
+                    generic_channel::oneshot::<()>()
+                else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::server("Could not create a channel to close the target"),
+                    );
+                    return;
+                };
+                self.embedder
+                    .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                        WebDriverCommandMsg::CloseWebView(webview_id, close_ack_sender),
+                    ));
+                // The target is going away; drop any session attached to it
+                // so that clients observe the destruction.
+                if let Some(target_id_string) = params.get("targetId").and_then(Value::as_str) {
+                    let sessions_to_remove: Vec<String> = self
+                        .sessions
+                        .iter()
+                        .filter(|(_, session)| {
+                            self.targets
+                                .get(&session.target_id)
+                                .is_some_and(|target| target.target_id_string == target_id_string)
+                        })
+                        .map(|(session_id, _)| session_id.clone())
+                        .collect();
+                    for session_id in sessions_to_remove {
+                        self.sessions.remove(&session_id);
+                    }
+                }
+                let _ = close_ack_receiver.recv();
+                self.send_reply_to_connection(connection_id, id, json!({}));
+            },
+            "Target.activateTarget" => {
+                let Some(id) = id else { return };
+                let Some(webview_id) = params
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .and_then(|target_id| {
+                        self.targets
+                            .values()
+                            .find(|target| target.target_id_string == target_id)
+                            .map(|target| target.webview_id)
+                    })
+                else {
+                    self.send_error_to_connection(
+                        connection_id,
+                        id,
+                        CdpError::server("No target with given id found"),
+                    );
+                    return;
+                };
+                self.embedder
+                    .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                        WebDriverCommandMsg::FocusWebView(webview_id),
+                    ));
+                self.send_reply_to_connection(connection_id, id, json!({}));
+            },
+            "Target.exposeDevToolsProtocol" => {
+                let Some(id) = id else { return };
+                self.send_reply_to_connection(connection_id, id, json!({}));
             },
             method => {
                 let Some(id) = id else { return };
@@ -396,7 +592,86 @@ impl CdpServer {
                     }),
                 );
             },
-            "Page.captureScreenshot" | "Page.printToPDF" | "Page.startScreencast" => {
+            "Page.getFrameTree" => {
+                let Some(target) = self.targets.get(&target_id) else {
+                    self.send_session_error(
+                        connection_id,
+                        id,
+                        session_id,
+                        CdpError::server("Target not found"),
+                    );
+                    return;
+                };
+                self.send_session_reply(
+                    connection_id,
+                    id,
+                    session_id,
+                    json!({
+                        "frameTree": {
+                            "frame": {
+                                "id": target.target_id_string,
+                                "loaderId": "",
+                                "url": target.url,
+                                "mimeType": "text/html",
+                                "securityOrigin": origin_of(&target.url),
+                            },
+                            "childFrames": [],
+                        },
+                    }),
+                );
+            },
+            "Page.getResourceTree" => {
+                let Some(target) = self.targets.get(&target_id) else {
+                    self.send_session_error(
+                        connection_id,
+                        id,
+                        session_id,
+                        CdpError::server("Target not found"),
+                    );
+                    return;
+                };
+                self.send_session_reply(
+                    connection_id,
+                    id,
+                    session_id,
+                    json!({
+                        "frameTree": {
+                            "frame": {
+                                "id": target.target_id_string,
+                                "loaderId": "",
+                                "url": target.url,
+                                "mimeType": "text/html",
+                                "securityOrigin": origin_of(&target.url),
+                            },
+                            "resources": [],
+                        },
+                    }),
+                );
+            },
+            "Page.bringToFront" => {
+                let Some(webview_id) = self
+                    .targets
+                    .get(&target_id)
+                    .map(|target| target.webview_id)
+                else {
+                    self.send_session_error(
+                        connection_id,
+                        id,
+                        session_id,
+                        CdpError::server("Target not found"),
+                    );
+                    return;
+                };
+                self.embedder
+                    .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                        WebDriverCommandMsg::FocusWebView(webview_id),
+                    ));
+                self.send_session_reply(connection_id, id, session_id, json!({}));
+            },
+            "Page.captureScreenshot" => {
+                self.page_capture_screenshot(connection_id, id, session_id, params);
+            },
+            "Page.printToPDF" | "Page.startScreencast" | "Page.captureSnapshot" => {
                 self.send_session_error(
                     connection_id,
                     id,
@@ -420,19 +695,23 @@ impl CdpServer {
             "Runtime.evaluate" => {
                 self.runtime_evaluate(connection_id, id, session_id, params);
             },
-            "Runtime.discardConsoleEntries" => {
-                self.send_session_reply(connection_id, id, session_id, json!({}));
+            "Runtime.runScript" => {
+                // Script persistence is not supported; run the source right
+                // away like `Runtime.evaluate` would.
+                let mut params = params.clone();
+                if params.get("source").and_then(Value::as_str).is_some() {
+                    let source = params["source"].clone();
+                    params["expression"] = source;
+                }
+                self.runtime_evaluate(connection_id, id, session_id, &params);
             },
             "Runtime.compileScript" => {
-                self.send_session_reply(connection_id, id, session_id, json!([]));
+                // Scripts are not precompiled; hand out an unusable but
+                // well-formed id so that clients can proceed.
+                self.send_session_reply(connection_id, id, session_id, json!({ "scriptId": "0" }));
             },
             "Runtime.callFunctionOn" => {
-                self.send_session_error(
-                    connection_id,
-                    id,
-                    session_id,
-                    CdpError::server("Runtime.callFunctionOn is not supported by Servo"),
-                );
+                self.runtime_call_function_on(connection_id, id, session_id, params);
             },
             "Network.enable" => {
                 if let Some(session) = self.sessions.get_mut(session_id) {
@@ -446,7 +725,13 @@ impl CdpServer {
                 }
                 self.send_session_reply(connection_id, id, session_id, json!({}));
             },
-            "Network.getResponseBody" | "Network.getCookies" | "Network.setRequestInterception" => {
+            "Network.getResponseBody" => {
+                self.network_get_response_body(connection_id, id, session_id, params);
+            },
+            "Network.getCookies" | "Storage.getCookies" => {
+                self.send_session_reply(connection_id, id, session_id, json!({ "cookies": [] }));
+            },
+            "Network.setRequestInterception" => {
                 self.send_session_error(
                     connection_id,
                     id,
@@ -490,7 +775,10 @@ impl CdpServer {
             "DOM.requestChildNodes" => {
                 self.dom_request_child_nodes(connection_id, id, session_id, params);
             },
-            "DOM.getBoxModel" | "DOM.resolveNode" | "DOM.getNodeForLocation" => {
+            "DOM.getBoxModel" => {
+                self.dom_get_box_model(connection_id, id, session_id, params);
+            },
+            "DOM.resolveNode" | "DOM.getNodeForLocation" => {
                 self.send_session_error(
                     connection_id,
                     id,
@@ -500,6 +788,13 @@ impl CdpServer {
             },
             method if EMULATION_NOOP_METHODS.contains(&method) => {
                 self.send_session_reply(connection_id, id, session_id, json!({}));
+            },
+            method if SESSION_NOOP_METHODS.contains(&method) => {
+                warn!("Accepted automation method as a no-op: {method}");
+                self.send_session_reply(connection_id, id, session_id, json!({}));
+            },
+            "Console.getMessages" => {
+                self.send_session_reply(connection_id, id, session_id, json!({ "messages": [] }));
             },
             "Performance.enable" => {
                 self.send_session_reply(connection_id, id, session_id, json!({}));
@@ -711,11 +1006,11 @@ impl CdpServer {
         else {
             return;
         };
-        let Some(target) = self.targets.get(&target_id) else {
-            self.send_session_error(connection_id, id, session_id, CdpError::server("Target not found"));
-            return;
-        };
-        let Some(pipeline_id) = target.current_pipeline else {
+        let Some(pipeline_id) = self
+            .targets
+            .get(&target_id)
+            .and_then(|target| target.current_pipeline)
+        else {
             self.send_session_error(
                 connection_id,
                 id,
@@ -724,6 +1019,25 @@ impl CdpServer {
             );
             return;
         };
+        self.runtime_evaluate_in_pipeline(
+            connection_id,
+            id,
+            session_id,
+            pipeline_id,
+            &expression,
+        );
+    }
+
+    /// Evaluates an expression in the given pipeline, blocking until the
+    /// script thread replies.
+    fn runtime_evaluate_in_pipeline(
+        &mut self,
+        connection_id: u64,
+        id: Option<Value>,
+        session_id: &str,
+        pipeline_id: PipelineId,
+        expression: &str,
+    ) {
         let Some(script_sender) = self
             .pipelines
             .get(&pipeline_id)
@@ -738,6 +1052,7 @@ impl CdpServer {
             return;
         };
 
+        let expression = expression.to_owned();
         let Some((channel, port)) = generic_channel::channel::<EvaluateJSReply>() else {
             self.send_session_error(
                 connection_id,
@@ -1004,5 +1319,347 @@ impl CdpServer {
         event["sessionId"] = json!(session_id);
         self.send_to_connection(connection_id, event);
         self.send_session_reply(connection_id, id, session_id, json!({}));
+    }
+
+    /// Implements `Page.captureScreenshot` by asking the embedder to take a
+    /// screenshot of the target's webview (the same path WebDriver uses),
+    /// then encoding the result as a base64 PNG.
+    fn page_capture_screenshot(
+        &mut self,
+        connection_id: u64,
+        id: Option<Value>,
+        session_id: &str,
+        params: &Value,
+    ) {
+        let Some(webview_id) = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.target_id)
+            .and_then(|target_id| self.targets.get(&target_id))
+            .map(|target| target.webview_id)
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Target not found"),
+            );
+            return;
+        };
+
+        // The optional `clip` parameter is a rect in CSS pixels.
+        let rect = params.get("clip").and_then(|clip| {
+            let (x, y) = (clip.get("x")?.as_f64()? as f32, clip.get("y")?.as_f64()? as f32);
+            let width = clip.get("width")?.as_f64()? as f32;
+            let height = clip.get("height")?.as_f64()? as f32;
+            Some(Rect::new(
+                euclid::Point2D::new(x, y),
+                euclid::Size2D::new(width, height),
+            ))
+        });
+
+        let (result_sender, result_receiver) = crossbeam_channel::unbounded();
+        self.embedder
+            .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                WebDriverCommandMsg::TakeScreenshot(webview_id, rect, result_sender),
+            ));
+
+        let rgba_image = match result_receiver.recv_timeout(AUTOMATION_COMMAND_TIMEOUT) {
+            Ok(Ok(rgba_image)) => rgba_image,
+            Ok(Err(error)) => {
+                self.send_session_error(
+                    connection_id,
+                    id,
+                    session_id,
+                    CdpError::server(format!("Could not take a screenshot: {error:?}")),
+                );
+                return;
+            },
+            Err(_) => {
+                self.send_session_error(
+                    connection_id,
+                    id,
+                    session_id,
+                    CdpError::server("Taking a screenshot timed out"),
+                );
+                return;
+            },
+        };
+
+        let mut png_data = Cursor::new(Vec::new());
+        if let Err(error) =
+            DynamicImage::ImageRgba8(rgba_image).write_to(&mut png_data, ImageFormat::Png)
+        {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server(format!("Could not encode the screenshot: {error}")),
+            );
+            return;
+        }
+        self.send_session_reply(
+            connection_id,
+            id,
+            session_id,
+            json!({ "data": BASE64.encode(png_data.get_ref()) }),
+        );
+    }
+
+    /// Implements `Network.getResponseBody` from the response bodies that the
+    /// fetch layer captured for devtools.
+    fn network_get_response_body(
+        &mut self,
+        connection_id: u64,
+        id: Option<Value>,
+        session_id: &str,
+        params: &Value,
+    ) {
+        let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::invalid_params("'requestId' parameter is required"),
+            );
+            return;
+        };
+        let Some(request) = self.network_requests.get(request_id) else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Request not found"),
+            );
+            return;
+        };
+        let Some(body) = &request.body else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Response body is not available"),
+            );
+            return;
+        };
+
+        let is_text = request.mime_type.starts_with("text/") ||
+            matches!(
+                request.mime_type.split(';').next().unwrap_or_default(),
+                "application/json" |
+                    "application/javascript" |
+                    "application/xml" |
+                    "application/xhtml+xml" |
+                    "image/svg+xml" |
+                    "application/x-www-form-urlencoded"
+            );
+        let (body, base64_encoded) = if is_text {
+            (String::from_utf8_lossy(body).into_owned(), false)
+        } else {
+            (BASE64.encode(body), true)
+        };
+        self.send_session_reply(
+            connection_id,
+            id,
+            session_id,
+            json!({ "body": body, "base64Encoded": base64_encoded }),
+        );
+    }
+
+    /// Implements `Runtime.callFunctionOn` for functions called in an
+    /// execution context: the function declaration is applied to the
+    /// JSON-serialized arguments and evaluated in the context.
+    fn runtime_call_function_on(
+        &mut self,
+        connection_id: u64,
+        id: Option<Value>,
+        session_id: &str,
+        params: &Value,
+    ) {
+        let Some(function) = params
+            .get("functionDeclaration")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::invalid_params("'functionDeclaration' parameter is required"),
+            );
+            return;
+        };
+
+        // Only the execution-context flavor is supported: remote objects
+        // cannot be addressed because Servo does not keep them alive.
+        let Some(execution_context_id) = params.get("executionContextId").and_then(Value::as_i64)
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server(
+                    "Runtime.callFunctionOn only supports the 'executionContextId' flavor",
+                ),
+            );
+            return;
+        };
+        let Some(pipeline_id) = self
+            .pipelines
+            .iter()
+            .find(|(_, pipeline)| pipeline.execution_context_id == execution_context_id)
+            .map(|(pipeline_id, _)| *pipeline_id)
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Cannot find execution context with given id"),
+            );
+            return;
+        };
+
+        // Serialize the arguments as JavaScript literals.
+        let arguments: Vec<String> = params
+            .get("arguments")
+            .and_then(Value::as_array)
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .map(cdp_value_to_js_source)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let expression = format!(
+            "({function}).apply(undefined, [{arguments}])",
+            arguments = arguments.join(", ")
+        );
+        self.runtime_evaluate_in_pipeline(
+            connection_id,
+            id,
+            session_id,
+            pipeline_id,
+            &expression,
+        );
+    }
+
+    /// Implements `DOM.getBoxModel` using the layout information from the
+    /// script thread. The box is anchored at the origin because the layout
+    /// information does not include the absolute position of the node.
+    fn dom_get_box_model(
+        &mut self,
+        connection_id: u64,
+        id: Option<Value>,
+        session_id: &str,
+        params: &Value,
+    ) {
+        let Some(node_id) = params.get("nodeId").and_then(Value::as_i64) else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::invalid_params("'nodeId' parameter is required"),
+            );
+            return;
+        };
+        let Some(node_ref) = self.dom_nodes.get(&node_id) else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Could not find node with given id"),
+            );
+            return;
+        };
+        let pipeline_id = node_ref.pipeline_id;
+        let unique_id = node_ref.unique_id.clone();
+        let Some(script_sender) = self
+            .pipelines
+            .get(&pipeline_id)
+            .and_then(|pipeline| pipeline.script_sender.clone())
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Target is not ready"),
+            );
+            return;
+        };
+        let Some((channel, port)) =
+            generic_channel::channel::<Option<(devtools_traits::ComputedNodeLayout, devtools_traits::AutoMargins)>>()
+        else {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Could not create layout channel"),
+            );
+            return;
+        };
+        if script_sender
+            .send(DevtoolScriptControlMsg::GetLayout(pipeline_id, unique_id, channel))
+            .is_err()
+        {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Target is gone"),
+            );
+            return;
+        }
+
+        match port.try_recv_timeout(EVALUATE_TIMEOUT) {
+            Ok(Some((layout, _auto_margins))) => {
+                let (width, height) = (layout.width, layout.height);
+                let quad = [0.0f32, 0.0, width, 0.0, width, height, 0.0, height];
+                self.send_session_reply(
+                    connection_id,
+                    id,
+                    session_id,
+                    json!({
+                        "model": {
+                            "content": quad,
+                            "padding": quad,
+                            "border": quad,
+                            "margin": quad,
+                            "width": width,
+                            "height": height,
+                        },
+                    }),
+                );
+            },
+            Ok(None) => {
+                self.send_session_error(
+                    connection_id,
+                    id,
+                    session_id,
+                    CdpError::server("Could not compute the box model of the node"),
+                );
+            },
+            Err(_) => {
+                self.send_session_error(
+                    connection_id,
+                    id,
+                    session_id,
+                    CdpError::server("Computing the box model timed out"),
+                );
+            },
+        }
+    }
+}
+
+/// Serializes a CDP call-argument into a JavaScript literal that can be
+/// spliced into an evaluated expression.
+fn cdp_value_to_js_source(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(boolean) => boolean.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(string) => serde_json::to_string(string).unwrap_or_default(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_default()
+        },
     }
 }

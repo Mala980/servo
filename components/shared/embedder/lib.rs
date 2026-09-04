@@ -546,8 +546,12 @@ pub enum EmbedderMsg {
     InputEventsHandled(WebViewId, Vec<InputEventOutcome>),
     /// Send the embedder an accessibility tree update.
     AccessibilityTreeUpdate(WebViewId, TreeUpdate, Epoch),
+    /// Run a browser-level automation command (for example from the WebDriver
+    /// server or the Chrome DevTools Protocol server). The embedder is
+    /// responsible for the commands that touch browser chrome, like taking
+    /// screenshots or creating and closing WebViews.
+    WebDriverCommand(WebDriverCommandMsg),
 }
-
 impl Debug for EmbedderMsg {
     fn fmt(&self, formatter: &mut Formatter) -> Result<(), Error> {
         let string: &'static str = self.into();

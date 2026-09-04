@@ -627,6 +627,11 @@ fn update_preferences_from_command_line_arguments(
 
     if cmd_args.webdriver_port.is_some() {
         preferences.dom_testing_html_input_element_select_files_enabled = true;
+        // Mirror Chromium's `--enable-automation`: expose
+        // `navigator.webdriver` as `true` while automating through
+        // the WebDriver server. A plain `--remote-debugging-port` (CDP)
+        // does not enable it, just like in Chromium.
+        preferences.dom_webdriver_enabled = true;
     }
 
     if cmd_args.zealous_gc {
