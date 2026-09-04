@@ -157,6 +157,34 @@ pub enum WebDriverCommandMsg {
     ResetAllCookies(Sender<()>),
 }
 
+impl<'de> serde::Deserialize<'de> for WebDriverCommandMsg {
+    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `WebDriverCommandMsg` carries in-process channel handles, which
+        // have no serialized form. It only ever travels over in-process
+        // crossbeam channels, which do not serialize their messages; this
+        // implementation exists solely to satisfy the `serde` derives on
+        // the enums that carry it (like `EmbedderMsg`).
+        Err(serde::de::Error::custom(
+            "WebDriverCommandMsg cannot be deserialized; it is only sent over in-process channels",
+        ))
+    }
+}
+
+impl serde::Serialize for WebDriverCommandMsg {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // See the `Deserialize` implementation above.
+        Err(serde::ser::Error::custom(
+            "WebDriverCommandMsg cannot be serialized; it is only sent over in-process channels",
+        ))
+    }
+}
+
 impl WebDriverCommandMsg {
     /// The [`WebViewId`] this command targets, when the command is scoped to
     /// a particular webview. Commands that create new webviews or that are
