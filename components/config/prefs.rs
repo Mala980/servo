@@ -692,7 +692,7 @@ impl UserAgentPlatform {
     /// engine as something else (or as an unknown engine) makes sites serve
     /// degraded experiences or block the browser as a bot.
     pub fn to_user_agent_string(&self) -> String {
-        const CHROME_VERSION: &str = Self::CHROMIUM_MAJOR_VERSION;
+        let chrome_version = Self::CHROMIUM_MAJOR_VERSION;
         match self {
             UserAgentPlatform::Desktop
                 if cfg!(all(target_os = "windows", target_arch = "x86_64")) =>
@@ -701,36 +701,36 @@ impl UserAgentPlatform {
                 // `Windows NT 10.0`, regardless of the actual OS version
                 // (user-agent reduction).
                 format!(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Desktop if cfg!(target_os = "macos") => {
                 // Chrome on macOS is frozen at `Intel Mac OS X 10_15_7`
                 // (user-agent reduction).
                 format!(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Desktop => {
                 format!(
-                    "Mozilla/5.0 (X11; Linux {ARCH}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (X11; Linux {ARCH}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
                 )
             },
             UserAgentPlatform::Android => {
                 // `K` is the frozen device model of Chrome's user-agent
                 // reduction for Android.
                 format!(
-                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Mobile Safari/537.36"
+                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Mobile Safari/537.36"
                 )
             },
             UserAgentPlatform::OpenHarmony => format!(
-                "Mozilla/5.0 (Linux; OpenHarmony) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Linux; OpenHarmony) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
             ),
             UserAgentPlatform::Ios => {
                 // Chrome on iOS reports itself as CriOS with the WebKit
                 // version that the system WebView uses.
                 format!(
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/{CHROME_VERSION}.0.0.0 Mobile/15E148 Safari/604.1"
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/{chrome_version}.0.0.0 Mobile/15E148 Safari/604.1"
                 )
             },
         }
