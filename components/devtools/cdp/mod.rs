@@ -301,7 +301,6 @@ struct CdpTarget {
     /// The `targetId` string handed out to clients.
     target_id_string: String,
     /// The WebView this browsing context belongs to.
-    #[expect(dead_code)]
     webview_id: WebViewId,
     title: String,
     url: String,
