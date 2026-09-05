@@ -485,11 +485,11 @@ jobs:
             echo "=== Site load test: mode=$mode port=$port ==="
             pkill -f "remote-debugging-port $port" 2>/dev/null || true
             sleep 1
-            timeout 600 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
+            timeout 1200 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
               --remote-debugging-listen-address 127.0.0.1 about:blank \
               > "smoke-out/site-$mode-server.log" 2>&1 &
             pid=$!
-            timeout 540 python3 - "$mode" "$port" <<'PYEOF' || failed=1
+            timeout 1050 python3 - "$mode" "$port" <<'PYEOF' || failed=1
           import base64, hashlib, json, os, socket, struct, sys, time, urllib.request
           from urllib.parse import urlsplit
 
@@ -648,11 +648,47 @@ jobs:
                   events.append(reply)
               raise TimeoutError(method)
 
+          # Warm-up ladder: probe the server with increasingly demanding
+          # commands so an early-startup stall becomes visible per stage.
+          # Browser.getVersion is answered inline; Target.getTargets reads
+          # server state; createTarget on about:blank exercises the full
+          # embedder NewWindow path (the one that needs the event loop).
+          def probe(method, params, ptimeout, label):
+              try:
+                  pr = cmd(method, params, timeout=ptimeout)
+                  err = pr.get("error")
+                  print(f"PROBE {mode}/{label}: {'OK' if not err else err}", flush=True)
+                  return True
+              except TimeoutError:
+                  print(f"PROBE {mode}/{label}: TIMEOUT after {ptimeout}s", flush=True)
+                  try:
+                      print(f"SERVER-TAIL {mode}:\n" +
+                            open(f"smoke-out/site-{mode}-server.log", errors="replace").read()[-1500:],
+                            flush=True)
+                  except OSError:
+                      pass
+                  return False
+          if not probe("Browser.getVersion", None, 10, "getVersion"):
+              sys.exit(1)
+          if not probe("Target.getTargets", None, 15, "getTargets"):
+              sys.exit(1)
+          if not probe("Target.createTarget", {"url": "about:blank"}, 30, "createTarget-blank"):
+              sys.exit(1)
+          time.sleep(2)
+
           for i, site in enumerate(sites):
               name = f"{mode}/site{i}({site})"
               try:
-                  r = cmd("Target.createTarget", {"url": site})
-                  tid = r.get("result", {}).get("targetId")
+                  r = None
+                  for attempt in range(2):
+                      try:
+                          r = cmd("Target.createTarget", {"url": site}, timeout=45)
+                          break
+                      except TimeoutError:
+                          if attempt == 0:
+                              print(f"CREATE-RETRY {mode} {site}", flush=True)
+                              time.sleep(5)
+                  tid = (r or {}).get("result", {}).get("targetId")
                   if not tid:
                       check(f"{name} createTarget", False, r.get("error") or r)
                       continue
@@ -731,6 +767,12 @@ jobs:
                       pass
               except (EOFError, OSError, TimeoutError, json.JSONDecodeError) as e:
                   check(f"{name} crashed/protocol error", False, repr(e))
+                  try:
+                      print(f"SERVER-TAIL {mode}:\n" +
+                            open(f"smoke-out/site-{mode}-server.log", errors="replace").read()[-1200:],
+                            flush=True)
+                  except OSError:
+                      pass
           json.dump({"results": results}, open(f"smoke-out/site-{mode}-results.json", "w"), indent=1)
           bad = [x for x in results if x["critical"] and not x["ok"]]
           print(f"SMOKE SUMMARY ({mode}): {len(results) - len(bad)}/{len(results)} checks passed", flush=True)
