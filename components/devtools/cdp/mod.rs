@@ -313,14 +313,6 @@ struct CdpPipeline {
     script_sender: Option<GenericSender<devtools_traits::DevtoolScriptControlMsg>>,
 }
 
-/// The state of a network request that is in flight, used to correlate
-/// request and response events.
-struct NetworkRequestState {
-    browsing_context_id: BrowsingContextId,
-    url: String,
-    finished: bool,
-}
-
 /// A DOM node reference used by the `DOM` domain to resolve `nodeId`s back
 /// to script-side nodes.
 struct DomNodeRef {

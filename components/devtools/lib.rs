@@ -186,6 +186,10 @@ impl DevtoolsInstance {
         receiver: Receiver<DevtoolsControlMsg>,
         embedder: EmbedderProxy,
     ) -> Option<Self> {
+        // A token shared with the embedder to bypass permission prompts;
+        // reused by the CLI acceptor thread below.
+        let mut token = String::new();
+
         // The Firefox remote debugging protocol server is only started when
         // the devtools server is explicitly enabled; the Chrome DevTools
         // Protocol server is started independently below.
@@ -214,7 +218,7 @@ impl DevtoolsInstance {
             } else {
                 Err(())
             };
-            let token = format!("{:X}", rng().next_u32());
+            token = format!("{:X}", rng().next_u32());
             embedder.send(EmbedderMsg::OnDevtoolsStarted(port, token.clone()));
 
             match bound {

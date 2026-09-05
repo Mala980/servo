@@ -15,6 +15,7 @@ use devtools_traits::{DevtoolScriptControlMsg, EvaluateJSReply, NodeInfo};
 use embedder_traits::WebDriverCommandMsg;
 use euclid::Rect;
 use image::{DynamicImage, ImageFormat};
+use log::warn;
 use serde_json::{Value, json};
 use servo_base::generic_channel;
 use servo_base::id::PipelineId;
@@ -964,13 +965,13 @@ impl CdpServer {
         };
         let frame_id = self
             .targets
-            .get(&target_id)
+            .get(&target)
             .map(|target| target.target_id_string.clone())
             .unwrap_or_default();
 
         let result = match ServoUrl::parse(url_string) {
             Ok(url) => {
-                match self.send_to_script_of_target(target_id, move |pipeline_id| {
+                match self.send_to_script_of_target(target, move |pipeline_id| {
                     DevtoolScriptControlMsg::NavigateTo(pipeline_id, url)
                 }) {
                     Ok(()) => json!({ "frameId": frame_id, "loaderId": "" }),
