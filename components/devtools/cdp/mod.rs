@@ -95,12 +95,13 @@ pub(crate) fn start(embedder: EmbedderProxy) -> Option<CdpHandle> {
         web_socket_debugger_url,
         browser_id,
     )));
+    let handle = CdpHandle(server.clone());
     thread::Builder::new()
         .name("CdpAcceptor".to_owned())
         .spawn(move || acceptor_loop(listener, server))
         .expect("Thread spawning failed");
 
-    Some(CdpHandle(server))
+    Some(handle)
 }
 
 /// Extracts the Chromium major version from the `Chrome/` token of a
@@ -238,7 +239,7 @@ fn register_connection(server: &Arc<Mutex<CdpServer>>, ws_stream: WsStream) {
 
     thread::Builder::new()
         .name("CdpClientHandler".to_owned())
-        .spawn(move || client_handler_loop(server, connection_id, receiver))
+        .spawn(move || client_handler_loop(server.clone(), connection_id, receiver))
         .expect("Thread spawning failed");
 }
 
@@ -440,7 +441,7 @@ impl CdpServer {
             .collect();
         for session_id in session_ids {
             let connection_id = self.sessions[&session_id].connection_id;
-            let mut event = event;
+            let mut event = event.clone();
             event["sessionId"] = json!(session_id);
             self.send_to_connection(connection_id, event);
         }

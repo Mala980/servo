@@ -175,7 +175,7 @@ struct DevtoolsInstance {
     /// The Chrome DevTools Protocol (CDP) server, enabled with the
     /// `remote_debugging_enabled` preference. It receives a copy of every
     /// event that flows through this instance.
-    #[conditional_malloc_size_of]
+    #[ignore_malloc_size_of = "The CDP server owns threads and channels"]
     cdp: Option<cdp::CdpHandle>,
     next_resource_id: u64,
 }

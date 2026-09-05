@@ -341,7 +341,7 @@ impl CdpServer {
                 // Open a new tab through the embedder. The reply carries the
                 // id of the new webview; the same id is used as the CDP
                 // target id once the browsing context shows up.
-                let Ok(Some((webview_id_sender, webview_id_receiver))) =
+                let Some((webview_id_sender, webview_id_receiver)) =
                     generic_channel::oneshot::<servo_base::id::WebViewId>()
                 else {
                     self.send_error_to_connection(
@@ -407,7 +407,7 @@ impl CdpServer {
                     );
                     return;
                 };
-                let Ok(Some((close_ack_sender, close_ack_receiver))) =
+                let Some((close_ack_sender, close_ack_receiver)) =
                     generic_channel::oneshot::<()>()
                 else {
                     self.send_error_to_connection(
@@ -916,7 +916,7 @@ impl CdpServer {
             .iter()
             .filter(|(_, pipeline)| pipeline.browsing_context_id == target_id)
             .map(|(pipeline_id, pipeline)| {
-                (pipeline_id, pipeline.execution_context_id, pipeline.url.clone())
+                (*pipeline_id, pipeline.execution_context_id, pipeline.url.clone())
             })
             .collect();
 

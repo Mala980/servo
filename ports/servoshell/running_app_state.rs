@@ -194,6 +194,13 @@ pub(crate) struct RunningAppState {
     /// was enabled.
     pub(crate) webdriver_receiver: Option<Receiver<WebDriverCommandMsg>>,
 
+    /// A clone of the sender side of the WebDriver command channel. The
+    /// [`WebViewDelegate`] implementation uses it to re-queue automation
+    /// commands that arrive on the embedder thread (from the Chrome DevTools
+    /// Protocol server), so that they are handled on the next event loop
+    /// spin where `Rc<Self>` is available.
+    pub(crate) webdriver_sender: Option<Sender<WebDriverCommandMsg>>,
+
     /// servoshell specific preferences created during startup of the application.
     pub(crate) servoshell_preferences: ServoShellPreferences,
 
@@ -246,16 +253,17 @@ impl RunningAppState {
     ) -> Self {
         servo.set_delegate(Rc::new(ServoShellServoDelegate));
 
-        let webdriver_receiver = servoshell_preferences.webdriver_port.get().map(|port| {
-            let (embedder_sender, embedder_receiver) = unbounded();
-            webdriver_server::start_server(
-                port,
-                embedder_sender,
-                event_loop_waker,
-                default_preferences,
-            );
-            embedder_receiver
-        });
+        let (webdriver_sender, webdriver_receiver) =
+            servoshell_preferences.webdriver_port.get().map(|port| {
+                let (embedder_sender, embedder_receiver) = unbounded();
+                webdriver_server::start_server(
+                    port,
+                    embedder_sender.clone(),
+                    event_loop_waker,
+                    default_preferences,
+                );
+                (Some(embedder_sender), Some(embedder_receiver))
+            }).unwrap_or((None, None));
 
         let experimental_preferences_enabled =
             Cell::new(servoshell_preferences.experimental_preferences_enabled);
@@ -272,6 +280,7 @@ impl RunningAppState {
             webdriver_embedder_controls: Default::default(),
             pending_webdriver_events: Default::default(),
             webdriver_receiver,
+            webdriver_sender,
             servoshell_preferences,
             servo,
             achieved_stable_image: Default::default(),
@@ -713,9 +722,13 @@ impl WebViewDelegate for RunningAppState {
     fn handle_webdriver_command(&self, _webview: WebView, command: WebDriverCommandMsg) {
         // Automation commands arriving through the embedder (currently the
         // Chrome DevTools Protocol server) are handled exactly like the ones
-        // from the WebDriver server. They never create new windows, so no
-        // platform window factory is needed.
-        self.handle_webdriver_command(command, None);
+        // from the WebDriver server. Re-queue them onto the WebDriver
+        // command channel so that they are handled on the next event loop
+        // spin, where `Rc<Self>` is available (needed to create new
+        // windows and webviews).
+        if let Some(sender) = &self.webdriver_sender {
+            let _ = sender.send(command);
+        }
     }
 
     fn notify_status_text_changed(&self, webview: WebView, _status: Option<String>) {
