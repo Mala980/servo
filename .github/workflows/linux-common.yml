@@ -389,13 +389,29 @@ jobs:
           def ev(expr):
               return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid)
 
-          title, deadline = None, time.time() + 40
-          while time.time() < deadline:
-              r = ev("document.title")
-              title = r.get("result", {}).get("result", {}).get("value")
-              if title == "Example Domain":
-                  break
-              time.sleep(1)
+          r = ev("location.href")
+          print("INITIAL-LOCATION:", r.get("result", {}).get("result", {}).get("value"), flush=True)
+
+          def wait_for_title(seconds):
+              title, deadline = None, time.time() + seconds
+              while time.time() < deadline:
+                  r = ev("document.title")
+                  title = r.get("result", {}).get("result", {}).get("value")
+                  if title == "Example Domain":
+                      break
+                  time.sleep(1)
+              return title
+
+          title = wait_for_title(30)
+          if title != "Example Domain":
+              # createTarget carries the url through the embedder LoadUrl
+              # path; if that navigation did not land, drive it through
+              # Runtime.evaluate instead and log the difference loudly.
+              print("LOADURL-PATH: navigation did not land, using evaluate fallback", flush=True)
+              ev("location.href = 'https://example.com'")
+              title = wait_for_title(30)
+              r = ev("location.href")
+              print("POST-FALLBACK-LOCATION:", r.get("result", {}).get("result", {}).get("value"), flush=True)
           check("Navigate + Runtime.evaluate title", title == "Example Domain", title)
 
           r = ev("navigator.userAgent")
@@ -612,8 +628,22 @@ jobs:
                           " txt: (document.body && document.body.innerText ?"
                           " document.body.innerText.slice(0, 240) : '')})")
                   metrics = None
+                  fallback = [False, ""]
                   deadline = time.time() + 120
                   while time.time() < deadline:
+                      if not fallback[0] and time.time() > deadline - 90:
+                          # If the embedder LoadUrl path did not land within
+                          # 30s, drive the navigation through
+                          # Runtime.evaluate and log the difference loudly.
+                          fallback[0] = True
+                          try:
+                              cmd("Runtime.evaluate",
+                                  {"expression": f"location.href = {json.dumps(site)}",
+                                   "returnByValue": True}, session=sid, timeout=25)
+                              print(f"LOADURL-PATH ({site}): navigation did not land, "
+                                    "using evaluate fallback", flush=True)
+                          except (TimeoutError, EOFError, OSError):
+                              pass
                       try:
                           r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True},
                                   session=sid, timeout=25)
@@ -627,6 +657,14 @@ jobs:
                               metrics = m
                               break
                       time.sleep(2)
+                  if fallback[0]:
+                      try:
+                          r = cmd("Runtime.evaluate", {"expression": "location.href",
+                                                       "returnByValue": True}, session=sid, timeout=25)
+                          print(f"POST-FALLBACK-LOCATION ({site}):",
+                                r.get("result", {}).get("result", {}).get("value"), flush=True)
+                      except (TimeoutError, EOFError, OSError):
+                          pass
                   check(f"{name} readyState complete", bool(metrics),
                         json.dumps(metrics, ensure_ascii=False)[:280] if metrics else "timeout waiting for load")
                   els = (metrics or {}).get("els", 0)

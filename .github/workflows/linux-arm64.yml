@@ -135,6 +135,10 @@ jobs:
       # reusable workflow's `type: number`/`type: boolean` inputs reject, so
       # coerce them explicitly (this also covers the empty-string defaults
       # that the dispatch API sends for untouched booleans).
+      # `workflow_dispatch` delivers number/boolean inputs as strings, which a
+      # reusable workflow's `type: number`/`type: boolean` inputs reject, and
+      # an untouched string input can arrive as an empty string, so coerce
+      # them explicitly.
       number-of-wpt-chunks: ${{ fromJSON(inputs.number-of-wpt-chunks || '20') }}
       unit-tests: ${{ inputs.unit-tests == true || inputs.unit-tests == 'true' }}
       devtools-tests: ${{ inputs.devtools-tests == true || inputs.devtools-tests == 'true' }}
@@ -143,5 +147,5 @@ jobs:
       bencher: ${{ inputs.bencher == true || inputs.bencher == 'true' }}
       coverage: ${{ inputs.coverage == true || inputs.coverage == 'true' }}
       capi: ${{ inputs.capi == true || inputs.capi == 'true' }}
-      smoke-sites: ${{ inputs.smoke-sites }}
+      smoke-sites: ${{ inputs.smoke-sites || 'https://terabox.com,https://v1.voratoon.com' }}
 
