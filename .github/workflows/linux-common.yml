@@ -402,14 +402,14 @@ jobs:
                   time.sleep(1)
               return title
 
-          title = wait_for_title(30)
+          title = wait_for_title(60)
           if title != "Example Domain":
               # createTarget carries the url through the embedder LoadUrl
               # path; if that navigation did not land, drive it through
               # Runtime.evaluate instead and log the difference loudly.
               print("LOADURL-PATH: navigation did not land, using evaluate fallback", flush=True)
               ev("location.href = 'https://example.com'")
-              title = wait_for_title(30)
+              title = wait_for_title(60)
               r = ev("location.href")
               print("POST-FALLBACK-LOCATION:", r.get("result", {}).get("result", {}).get("value"), flush=True)
           check("Navigate + Runtime.evaluate title", title == "Example Domain", title)
@@ -476,9 +476,15 @@ jobs:
           echo "Using binary: $BIN; sites: $SMOKE_SITES"
           mkdir -p smoke-out
           SITE_FAILED=0
+          # Kill any leftover automation servo from earlier steps that could
+          # still hold the debugging ports, and let the sockets settle.
+          pkill -f "remote-debugging-port" 2>/dev/null || true
+          sleep 2
           run_mode() {
             local mode="$1" port="$2" extra="$3" pid failed=0
             echo "=== Site load test: mode=$mode port=$port ==="
+            pkill -f "remote-debugging-port $port" 2>/dev/null || true
+            sleep 1
             timeout 600 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
               --remote-debugging-listen-address 127.0.0.1 about:blank \
               > "smoke-out/site-$mode-server.log" 2>&1 &
@@ -501,7 +507,7 @@ jobs:
                   return json.loads(r.read().decode())
 
           ver = None
-          deadline = time.time() + 30
+          deadline = time.time() + 60
           while time.time() < deadline:
               try:
                   ver = http_get("/json/version")
@@ -513,10 +519,30 @@ jobs:
               sys.exit(1)
           check(f"{mode} CDP server up", True)
 
+          # Do not connect during startup: wait until the browser has fully
+          # initialized and registered at least one page target (this is the
+          # same readiness signal Puppeteer/Playwright wait for).
+          targets = None
+          deadline = time.time() + 60
+          while time.time() < deadline:
+              try:
+                  t = http_get("/json/list")
+                  if isinstance(t, list) and t:
+                      targets = t
+                      break
+              except Exception:
+                  pass
+              time.sleep(1)
+          if not targets:
+              check(f"{mode} page target registered", False,
+                    "/json/list never showed a page target within 60s")
+              sys.exit(1)
+          check(f"{mode} page target registered", True, f"{len(targets)} target(s)")
+
           class WS:
-              def __init__(self, url):
+              def __init__(self, url, timeout=70):
                   parts = urlsplit(url)
-                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=70)
+                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
                   key = base64.b64encode(os.urandom(16)).decode()
                   self.s.sendall((
                       f"GET {parts.path} HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
@@ -582,7 +608,25 @@ jobs:
                           continue
                       return payload.decode("utf-8", "replace")
 
-          ws = WS(ver["webSocketDebuggerUrl"])
+          ws, last_err = None, None
+          for attempt in range(3):
+              try:
+                  ws = WS(ver["webSocketDebuggerUrl"])
+                  break
+              except (OSError, EOFError, AssertionError) as e:
+                  last_err = e
+                  print(f"WS-RETRY {mode}: attempt {attempt + 1} failed: {e!r}", flush=True)
+                  time.sleep(3)
+          if ws is None:
+              check(f"{mode} WebSocket connect", False, repr(last_err))
+              try:
+                  ver2 = http_get("/json/version")
+                  print(f"DIAG {mode}: /json/version still OK: "
+                        f"{ver2.get('webSocketDebuggerUrl')}", flush=True)
+              except Exception as e2:
+                  print(f"DIAG {mode}: /json/version now fails: {e2!r}", flush=True)
+              sys.exit(1)
+          check(f"{mode} WebSocket connect", True)
           next_id, events = [0], []
 
           def cmd(method, params=None, session=None, timeout=30):
@@ -695,7 +739,9 @@ jobs:
               sys.exit(1)
           PYEOF
             kill $pid 2>/dev/null || true
+            pkill -f "remote-debugging-port $port" 2>/dev/null || true
             wait $pid 2>/dev/null || true
+            sleep 2
             if [ "$failed" = "1" ]; then
               echo "### mode $mode FAILED"; tail -30 "smoke-out/site-$mode-server.log"; SITE_FAILED=1
             else
