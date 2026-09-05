@@ -379,7 +379,7 @@ impl CdpServer {
                         .expect("Could not create a load status channel");
                 self.embedder
                     .send(embedder_traits::EmbedderMsg::WebDriverCommand(
-                        WebDriverCommandMsg::LoadUrl(webview_id, url, load_status_sender),
+                        WebDriverCommandMsg::LoadUrl(webview_id, url.into_url(), load_status_sender),
                     ));
                 self.send_reply_to_connection(
                     connection_id,
