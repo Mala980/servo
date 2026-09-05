@@ -69,6 +69,10 @@ on:
         required: false
         default: false
         type: boolean
+      smoke-sites:
+        required: false
+        default: ""
+        type: string
 
 env:
   RUST_BACKTRACE: 1
@@ -227,10 +231,14 @@ jobs:
         run: |
           set -u
           mkdir -p smoke-out
-          BIN="target/${{ inputs.profile }}/servo"
+          BIN="target/${{ inputs.profile }}/servoshell"
           if [ ! -x "$BIN" ]; then
-            echo "Cannot find the built binary at $BIN"; find target -maxdepth 3 -type f -name servo; exit 1
+            BIN=$(find target -maxdepth 4 -type f -name servoshell -not -path '*packaging-temp*' 2>/dev/null | head -1)
           fi
+          if [ -z "${BIN:-}" ] || [ ! -x "$BIN" ]; then
+            echo "Cannot find the built servoshell binary"; find target -maxdepth 4 -name 'servo*' | head -20; exit 1
+          fi
+          echo "Using binary: $BIN"
           # 1. Plain headless render: CLI screenshot mode over the network.
           timeout 120 xvfb-run -a "$BIN" -z -f -o smoke-out/render.png https://example.com \
             || echo "::warning::CLI screenshot mode exited non-zero"
@@ -435,6 +443,233 @@ jobs:
             echo "### CDP functional test FAILED"; tail -40 smoke-out/cdp-server.log; exit 1
           fi
           echo "### CDP functional test PASSED"
+      - name: Site load test (headless + windowed)
+        if: ${{ inputs.arch == 'arm64' && inputs.smoke-sites != '' }}
+        env:
+          SMOKE_SITES: ${{ inputs.smoke-sites }}
+        shell: bash
+        run: |
+          set -u
+          BIN="target/${{ inputs.profile }}/servoshell"
+          if [ ! -x "$BIN" ]; then
+            BIN=$(find target -maxdepth 4 -type f -name servoshell -not -path '*packaging-temp*' 2>/dev/null | head -1)
+          fi
+          if [ -z "${BIN:-}" ] || [ ! -x "$BIN" ]; then
+            echo "Cannot find the built servoshell binary"; exit 1
+          fi
+          echo "Using binary: $BIN; sites: $SMOKE_SITES"
+          mkdir -p smoke-out
+          SITE_FAILED=0
+          run_mode() {
+            local mode="$1" port="$2" extra="$3" pid failed=0
+            echo "=== Site load test: mode=$mode port=$port ==="
+            timeout 600 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
+              --remote-debugging-listen-address 127.0.0.1 about:blank \
+              > "smoke-out/site-$mode-server.log" 2>&1 &
+            pid=$!
+            timeout 540 python3 - "$mode" "$port" <<'PYEOF' || failed=1
+          import base64, hashlib, json, os, socket, struct, sys, time, urllib.request
+          from urllib.parse import urlsplit
+
+          mode, port = sys.argv[1], int(sys.argv[2])
+          HOST = "127.0.0.1"
+          sites = [s.strip() for s in os.environ.get("SMOKE_SITES", "").split(",") if s.strip()]
+          results = []
+
+          def check(name, ok, detail="", critical=True):
+              results.append({"name": name, "ok": bool(ok), "critical": bool(critical), "detail": str(detail)[:300]})
+              print(f"SMOKE-CHECK {name}: {'PASS' if ok else 'FAIL'} {str(detail)[:200]}", flush=True)
+
+          def http_get(path, timeout=5):
+              with urllib.request.urlopen(f"http://{HOST}:{port}{path}", timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          ver = None
+          deadline = time.time() + 30
+          while time.time() < deadline:
+              try:
+                  ver = http_get("/json/version")
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          if ver is None:
+              check(f"{mode} CDP server up", False, "/json/version unreachable")
+              sys.exit(1)
+          check(f"{mode} CDP server up", True)
+
+          class WS:
+              def __init__(self, url):
+                  parts = urlsplit(url)
+                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=70)
+                  key = base64.b64encode(os.urandom(16)).decode()
+                  self.s.sendall((
+                      f"GET {parts.path} HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                  ).encode())
+                  buf = b""
+                  while b"\r\n\r\n" not in buf:
+                      buf += self.s.recv(4096)
+                  head, _, rest = buf.partition(b"\r\n\r\n")
+                  assert b" 101 " in b" " + head.split(b"\r\n")[0] + b" ", head
+                  expect = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+                  assert expect in head, "bad Sec-WebSocket-Accept"
+                  self.buf = rest
+
+              def _read(self, n):
+                  while len(self.buf) < n:
+                      data = self.s.recv(65536)
+                      if not data:
+                          raise EOFError("websocket closed")
+                      self.buf += data
+                  out, self.buf = self.buf[:n], self.buf[n:]
+                  return out
+
+              def send(self, obj):
+                  data = json.dumps(obj).encode()
+                  mask = os.urandom(4)
+                  n = len(data)
+                  if n < 126:
+                      header = b"\x81" + bytes([0x80 | n])
+                  elif n < 65536:
+                      header = b"\x81" + bytes([0x80 | 126]) + struct.pack(">H", n)
+                  else:
+                      header = b"\x81" + bytes([0x80 | 127]) + struct.pack(">Q", n)
+                  self.s.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+              def recv_msg(self):
+                  frag = bytearray()
+                  while True:
+                      b1, b2 = self._read(2)
+                      fin, op, ln = b2 & 0x80, b1 & 0x0F, b2 & 0x7F
+                      if ln == 126:
+                          ln = struct.unpack(">H", self._read(2))[0]
+                      elif ln == 127:
+                          ln = struct.unpack(">Q", self._read(8))[0]
+                      if b2 & 0x80:
+                          self._read(4)
+                      payload = self._read(ln)
+                      if op == 0x9:
+                          self.s.sendall(b"\x8a\x80" + os.urandom(4))
+                          continue
+                      if op == 0x8:
+                          raise EOFError("websocket closed by server")
+                      if op in (0x1, 0x2) and not fin:
+                          frag += payload
+                          continue
+                      if op == 0x0:
+                          frag += payload
+                          if fin:
+                              msg = bytes(frag)
+                              frag = bytearray()
+                              return msg.decode("utf-8", "replace")
+                          continue
+                      return payload.decode("utf-8", "replace")
+
+          ws = WS(ver["webSocketDebuggerUrl"])
+          next_id, events = [0], []
+
+          def cmd(method, params=None, session=None, timeout=30):
+              next_id[0] += 1
+              msg = {"id": next_id[0], "method": method}
+              if params:
+                  msg["params"] = params
+              if session:
+                  msg["sessionId"] = session
+              ws.send(msg)
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  payload = ws.recv_msg()
+                  if not payload.strip():
+                      continue
+                  reply = json.loads(payload)
+                  if reply.get("id") == next_id[0]:
+                      return reply
+                  events.append(reply)
+              raise TimeoutError(method)
+
+          for i, site in enumerate(sites):
+              name = f"{mode}/site{i}({site})"
+              try:
+                  r = cmd("Target.createTarget", {"url": site})
+                  tid = r.get("result", {}).get("targetId")
+                  if not tid:
+                      check(f"{name} createTarget", False, r.get("error") or r)
+                      continue
+                  r = cmd("Target.attachToTarget", {"targetId": tid, "flatten": True})
+                  sid = r.get("result", {}).get("sessionId")
+                  if not sid:
+                      for ev_ in events:
+                          if ev_.get("method") == "Target.attachedToTarget" and \
+                                  tid in json.dumps(ev_.get("params", {})):
+                              sid = ev_["params"].get("sessionId")
+                              break
+                  if not sid:
+                      check(f"{name} attachToTarget", False, "no sessionId")
+                      continue
+                  expr = ("JSON.stringify({rs: document.readyState, title: document.title,"
+                          " els: document.querySelectorAll('*').length,"
+                          " txt: (document.body && document.body.innerText ?"
+                          " document.body.innerText.slice(0, 240) : '')})")
+                  metrics = None
+                  deadline = time.time() + 120
+                  while time.time() < deadline:
+                      try:
+                          r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True},
+                                  session=sid, timeout=25)
+                      except TimeoutError:
+                          time.sleep(2)
+                          continue
+                      val = r.get("result", {}).get("result", {}).get("value")
+                      if val:
+                          m = json.loads(val)
+                          if m.get("rs") == "complete":
+                              metrics = m
+                              break
+                      time.sleep(2)
+                  check(f"{name} readyState complete", bool(metrics),
+                        json.dumps(metrics, ensure_ascii=False)[:280] if metrics else "timeout waiting for load")
+                  els = (metrics or {}).get("els", 0)
+                  check(f"{name} DOM elements >= 20", els >= 20, str(els))
+                  r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=60)
+                  data = r.get("result", {}).get("data")
+                  size = 0
+                  if data:
+                      png = base64.b64decode(data)
+                      size = len(png)
+                      if png[:8] == b"\x89PNG\r\n\x1a\n" and size > 10000:
+                          open(f"smoke-out/site-{mode}-{i}.png", "wb").write(png)
+                  check(f"{name} screenshot PNG > 10KB", size > 10000, f"{size} bytes")
+                  if metrics:
+                      print(f"SITE-INFO {name}: title={metrics.get('title', '')[:90]!r} "
+                            f"text={metrics.get('txt', '')[:200]!r}", flush=True)
+                  try:
+                      cmd("Target.closeTarget", {"targetId": tid}, timeout=15)
+                  except (TimeoutError, EOFError, OSError):
+                      pass
+              except (EOFError, OSError, TimeoutError, json.JSONDecodeError) as e:
+                  check(f"{name} crashed/protocol error", False, repr(e))
+          json.dump({"results": results}, open(f"smoke-out/site-{mode}-results.json", "w"), indent=1)
+          bad = [x for x in results if x["critical"] and not x["ok"]]
+          print(f"SMOKE SUMMARY ({mode}): {len(results) - len(bad)}/{len(results)} checks passed", flush=True)
+          if bad:
+              print("Failed checks:", [x["name"] for x in bad])
+              sys.exit(1)
+          PYEOF
+            kill $pid 2>/dev/null || true
+            wait $pid 2>/dev/null || true
+            if [ "$failed" = "1" ]; then
+              echo "### mode $mode FAILED"; tail -30 "smoke-out/site-$mode-server.log"; SITE_FAILED=1
+            else
+              echo "### mode $mode PASSED"
+            fi
+          }
+          run_mode headless 9222 "-z"
+          run_mode windowed 9223 ""
+          if [ "$SITE_FAILED" = "1" ]; then
+            echo "### Site load test FAILED"; exit 1
+          fi
+          echo "### Site load test PASSED"
       - name: Upload functional test outputs
         if: ${{ !cancelled() && inputs.arch == 'arm64' }}
         uses: actions/upload-artifact@v7

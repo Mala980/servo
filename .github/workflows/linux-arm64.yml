@@ -57,6 +57,10 @@ on:
         required: false
         default: false
         type: boolean
+      smoke-sites:
+        required: false
+        default: ""
+        type: string
 
   workflow_dispatch:
     inputs:
@@ -104,6 +108,10 @@ on:
         required: false
         default: false
         type: boolean
+      smoke-sites:
+        default: "https://terabox.com,https://v1.voratoon.com"
+        required: false
+        type: string
 
 env:
   RUST_BACKTRACE: 1
@@ -135,4 +143,5 @@ jobs:
       bencher: ${{ inputs.bencher == true || inputs.bencher == 'true' }}
       coverage: ${{ inputs.coverage == true || inputs.coverage == 'true' }}
       capi: ${{ inputs.capi == true || inputs.capi == 'true' }}
+      smoke-sites: ${{ inputs.smoke-sites }}
 
