@@ -253,17 +253,23 @@ impl RunningAppState {
     ) -> Self {
         servo.set_delegate(Rc::new(ServoShellServoDelegate));
 
-        let (webdriver_sender, webdriver_receiver) =
-            servoshell_preferences.webdriver_port.get().map(|port| {
-                let (embedder_sender, embedder_receiver) = unbounded();
+        // The WebDriver command channel is also used by the Chrome DevTools
+        // Protocol server: its browser-level automation commands (new tabs,
+        // closing webviews, ...) are re-queued through it in
+        // `WebViewDelegate::handle_webdriver_command`. The channel must
+        // therefore exist even when no WebDriver server is started.
+        let (webdriver_sender, webdriver_receiver) = {
+            let (sender, receiver) = unbounded();
+            if let Some(port) = servoshell_preferences.webdriver_port.get() {
                 webdriver_server::start_server(
                     port,
-                    embedder_sender.clone(),
+                    sender.clone(),
                     event_loop_waker,
                     default_preferences,
                 );
-                (Some(embedder_sender), Some(embedder_receiver))
-            }).unwrap_or((None, None));
+            }
+            (Some(sender), Some(receiver))
+        };
 
         let experimental_preferences_enabled =
             Cell::new(servoshell_preferences.experimental_preferences_enabled);
