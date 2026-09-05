@@ -237,9 +237,12 @@ fn register_connection(server: &Arc<Mutex<CdpServer>>, ws_stream: WsStream) {
         connection_id
     };
 
+    // The client handler thread needs an owned handle; clone it here, since
+    // capturing the reference inside the closure would not be `'static`.
+    let server = Arc::clone(server);
     thread::Builder::new()
         .name("CdpClientHandler".to_owned())
-        .spawn(move || client_handler_loop(server.clone(), connection_id, receiver))
+        .spawn(move || client_handler_loop(server, connection_id, receiver))
         .expect("Thread spawning failed");
 }
 
@@ -1131,7 +1134,7 @@ fn debugger_value_to_text(value: &DebuggerValue) -> String {
 /// `Runtime.executionContextCreated`.
 fn origin_of(url: &str) -> String {
     ServoUrl::parse(url)
-        .map(|url| url.origin().ascii_serialization())
+        .map(|url| url.origin().ascii_serialization().into_owned())
         .unwrap_or_else(|_| "about:blank".to_owned())
 }
 

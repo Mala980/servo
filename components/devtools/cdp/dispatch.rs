@@ -370,6 +370,17 @@ impl CdpServer {
                 let target_id_string = format!("page-{}", self.next_target_number);
                 self.next_target_number += 1;
                 self.pending_targets.insert(webview_id, target_id_string.clone());
+                // Navigate the new webview to the requested URL. The command
+                // is re-queued through the embedder and handled by the
+                // embedder's event loop. The load status receiver is dropped:
+                // CDP clients observe navigation through target events.
+                let (load_status_sender, _) =
+                    generic_channel::channel::<embedder_traits::WebDriverLoadStatus>()
+                        .expect("Could not create a load status channel");
+                self.embedder
+                    .send(embedder_traits::EmbedderMsg::WebDriverCommand(
+                        WebDriverCommandMsg::LoadUrl(webview_id, url, load_status_sender),
+                    ));
                 self.send_reply_to_connection(
                     connection_id,
                     id,
