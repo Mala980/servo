@@ -219,6 +219,229 @@ jobs:
           name: ${{ inputs.uploaded-artifact-name }}
           path: target/${{ inputs.profile }}/servo-tech-demo.tar.gz
           if-no-files-found: error
+      - name: Functional test (render + CDP)
+        # The artifact is already uploaded, so a failure here can never lose
+        # the binary; it only signals that the shipped build misbehaves.
+        if: ${{ inputs.arch == 'arm64' }}
+        shell: bash
+        run: |
+          set -u
+          mkdir -p smoke-out
+          BIN="target/${{ inputs.profile }}/servo"
+          if [ ! -x "$BIN" ]; then
+            echo "Cannot find the built binary at $BIN"; find target -maxdepth 3 -type f -name servo; exit 1
+          fi
+          # 1. Plain headless render: CLI screenshot mode over the network.
+          timeout 120 xvfb-run -a "$BIN" -z -f -o smoke-out/render.png https://example.com \
+            || echo "::warning::CLI screenshot mode exited non-zero"
+          if [ -s smoke-out/render.png ] && [ "$(head -c 4 smoke-out/render.png)" = $'\x89PNG' ]; then
+            echo "SMOKE-CHECK CLI screenshot (-o): PASS ($(stat -c%s smoke-out/render.png) bytes)"
+          else
+            echo "SMOKE-CHECK CLI screenshot (-o): FAIL"; ls -la smoke-out/; exit 1
+          fi
+          # 2. Full CDP remote debugging session over the WebSocket protocol.
+          timeout 300 xvfb-run -a "$BIN" -z -f --remote-debugging-port 9222 \
+            --remote-debugging-listen-address 127.0.0.1 about:blank \
+            > smoke-out/cdp-server.log 2>&1 &
+          SERVER_PID=$!
+          SERVER_FAILED=0
+          timeout 240 python3 - <<'PYEOF' || SERVER_FAILED=1
+          import base64, hashlib, json, os, socket, struct, sys, time, urllib.request
+          from urllib.parse import urlsplit
+
+          HOST, PORT = "127.0.0.1", 9222
+          results = []
+
+          def check(name, ok, detail="", critical=True):
+              results.append({"name": name, "ok": bool(ok), "critical": bool(critical), "detail": str(detail)[:400]})
+              print(f"SMOKE-CHECK {name}: {'PASS' if ok else 'FAIL'} {detail}", flush=True)
+
+          def http_get(path, timeout=5):
+              with urllib.request.urlopen(f"http://{HOST}:{PORT}{path}", timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          ver = None
+          deadline = time.time() + 30
+          while time.time() < deadline:
+              try:
+                  ver = http_get("/json/version")
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          if ver is None:
+              check("CDP server up", False, "/json/version unreachable within 30s")
+              json.dump({"results": results}, open("smoke-out/cdp_results.json", "w"))
+              sys.exit(1)
+          print("version JSON:", json.dumps(ver)[:500], flush=True)
+          check("CDP server up", True)
+          check("Browser advertises Chrome", ver.get("Browser", "").startswith("Chrome/"), ver.get("Browser"))
+          check("UA is Chrome-shaped (anti-bot)", "Chrome/" in ver.get("User-Agent", ""), ver.get("User-Agent"))
+          targets = http_get("/json/list")
+          check("/json/list non-empty", isinstance(targets, list) and len(targets) >= 1, f"{len(targets)} target(s)")
+
+          class WS:
+              def __init__(self, url):
+                  parts = urlsplit(url)
+                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=30)
+                  key = base64.b64encode(os.urandom(16)).decode()
+                  self.s.sendall((
+                      f"GET {parts.path} HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                  ).encode())
+                  buf = b""
+                  while b"\r\n\r\n" not in buf:
+                      buf += self.s.recv(4096)
+                  head, _, rest = buf.partition(b"\r\n\r\n")
+                  assert b" 101 " in b" " + head.split(b"\r\n")[0] + b" ", head
+                  expect = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+                  assert expect in head, "bad Sec-WebSocket-Accept"
+                  self.buf = rest
+
+              def _read(self, n):
+                  while len(self.buf) < n:
+                      data = self.s.recv(65536)
+                      if not data:
+                          raise EOFError("websocket closed")
+                      self.buf += data
+                  out, self.buf = self.buf[:n], self.buf[n:]
+                  return out
+
+              def send(self, obj):
+                  data = json.dumps(obj).encode()
+                  mask = os.urandom(4)
+                  n = len(data)
+                  if n < 126:
+                      header = b"\x81" + bytes([0x80 | n])
+                  elif n < 65536:
+                      header = b"\x81" + bytes([0x80 | 126]) + struct.pack(">H", n)
+                  else:
+                      header = b"\x81" + bytes([0x80 | 127]) + struct.pack(">Q", n)
+                  self.s.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+              def recv_msg(self):
+                  while True:
+                      b1, b2 = self._read(2)
+                      op, ln = b1 & 0x0F, b2 & 0x7F
+                      if ln == 126:
+                          ln = struct.unpack(">H", self._read(2))[0]
+                      elif ln == 127:
+                          ln = struct.unpack(">Q", self._read(8))[0]
+                      if b2 & 0x80:
+                          self._read(4)
+                      payload = self._read(ln)
+                      if op == 0x9:  # ping -> pong
+                          self.s.sendall(b"\x8a\x80" + os.urandom(4))
+                          continue
+                      if op in (0x1, 0x2):
+                          return payload.decode("utf-8", "replace")
+                      if op == 0x8:
+                          raise EOFError("websocket closed by server")
+
+          ws = WS(ver["webSocketDebuggerUrl"])
+          next_id, events = [0], []
+
+          def cmd(method, params=None, session=None, timeout=30):
+              next_id[0] += 1
+              msg = {"id": next_id[0], "method": method}
+              if params:
+                  msg["params"] = params
+              if session:
+                  msg["sessionId"] = session
+              ws.send(msg)
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  payload = ws.recv_msg()
+                  if not payload.strip():
+                      continue
+                  reply = json.loads(payload)
+                  if reply.get("id") == next_id[0]:
+                      return reply
+                  events.append(reply)
+              raise TimeoutError(method)
+
+          r = cmd("Target.getTargets")
+          infos = r.get("result", {}).get("targetInfos", [])
+          check("Target.getTargets", "result" in r and isinstance(infos, list), r.get("error") or f"{len(infos)} target(s)")
+
+          r = cmd("Target.createTarget", {"url": "https://example.com"})
+          tid = r.get("result", {}).get("targetId")
+          check("Target.createTarget", bool(tid), r.get("error") or tid)
+
+          r = cmd("Target.attachToTarget", {"targetId": tid, "flatten": True})
+          sid = r.get("result", {}).get("sessionId")
+          if not sid:
+              for ev_ in events:
+                  if ev_.get("method") == "Target.attachedToTarget" and \
+                          tid in json.dumps(ev_.get("params", {})):
+                      sid = ev_["params"].get("sessionId")
+                      break
+          check("Target.attachToTarget (flatten)", bool(sid), r.get("error") or sid)
+
+          def ev(expr):
+              return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid)
+
+          title, deadline = None, time.time() + 40
+          while time.time() < deadline:
+              r = ev("document.title")
+              title = r.get("result", {}).get("result", {}).get("value")
+              if title == "Example Domain":
+                  break
+              time.sleep(1)
+          check("Navigate + Runtime.evaluate title", title == "Example Domain", title)
+
+          r = ev("navigator.userAgent")
+          ua = r.get("result", {}).get("result", {}).get("value", "")
+          check("navigator.userAgent Chrome-shaped", "Chrome/" in ua, ua)
+
+          r = ev("String(navigator.webdriver)")
+          wd = r.get("result", {}).get("result", {}).get("value")
+          check("navigator.webdriver hidden", wd == "false", wd)
+
+          r = ev("'4 ' + new Date(0).toISOString()")
+          js = r.get("result", {}).get("result", {}).get("value", "")
+          check("JS engine sanity", js.startswith("4 1970-"), js)
+
+          r = cmd("Page.bringToFront", session=sid)
+          check("Page.bringToFront", "result" in r and not r.get("error"), r.get("error"))
+
+          r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=45)
+          data = r.get("result", {}).get("data")
+          if data:
+              png = base64.b64decode(data)
+              ok = png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 100
+              check("Page.captureScreenshot", ok, f"{len(png)} bytes PNG")
+              if ok:
+                  open("smoke-out/cdp_screenshot.png", "wb").write(png)
+          else:
+              check("Page.captureScreenshot", False, r.get("error") or r)
+
+          r = cmd("Emulation.setUserAgentOverride", {"userAgent": "SmokeTest/1.0"}, session=sid)
+          check("Emulation.setUserAgentOverride accepted", "result" in r and not r.get("error"), r.get("error"), critical=False)
+
+          r = cmd("Target.closeTarget", {"targetId": tid})
+          check("Target.closeTarget", "result" in r and not r.get("error"), r.get("error"), critical=False)
+
+          json.dump({"results": results}, open("smoke-out/cdp_results.json", "w"), indent=1)
+          bad = [x for x in results if x["critical"] and not x["ok"]]
+          print(f"SMOKE SUMMARY: {len(results) - len(bad)}/{len(results)} checks passed", flush=True)
+          if bad:
+              print("Failed checks:", [x["name"] for x in bad])
+              sys.exit(1)
+          PYEOF
+          grep -a "DevTools listening on" smoke-out/cdp-server.log || true
+          kill $SERVER_PID 2>/dev/null || true
+          if [ "$SERVER_FAILED" = "1" ]; then
+            echo "### CDP functional test FAILED"; tail -40 smoke-out/cdp-server.log; exit 1
+          fi
+          echo "### CDP functional test PASSED"
+      - name: Upload functional test outputs
+        if: ${{ !cancelled() && inputs.arch == 'arm64' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-linux-${{ inputs.arch }}-${{ inputs.profile }}
+          path: smoke-out/
+          if-no-files-found: ignore
       - name: Collect artifact IDs needed by the release workflow
         id: artifact_ids
         shell: bash
