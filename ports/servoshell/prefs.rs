@@ -513,6 +513,15 @@ struct CmdArgs {
     /// A fixed seed for repeatbility of random pipeline closure.
     random_pipeline_closure_seed: Option<usize>,
 
+    /// Start the Chrome DevTools Protocol (CDP) remote debugging server on
+    /// this port, compatible with Chrome DevTools, Puppeteer and Selenium.
+    #[bpaf(argument("9222"))]
+    remote_debugging_port: Option<u16>,
+
+    /// The address the CDP remote debugging server listens on.
+    #[bpaf(argument("127.0.0.1"))]
+    remote_debugging_listen_address: Option<String>,
+
     /// Run in a sandbox if multiprocess.
     #[bpaf(short('S'), long)]
     sandbox: bool,

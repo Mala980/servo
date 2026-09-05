@@ -12,8 +12,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::window::LINE_HEIGHT;
-
 /// The time constant of the exponential ease-out, i.e. the time after which
 /// the remaining distance shrinks to about 37%. Chromium uses a similar
 /// value for its wheel scroll animation.
@@ -93,6 +91,7 @@ impl SmoothScrollAnimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::window::LINE_HEIGHT;
 
     fn total_delta(
         animator: &mut SmoothScrollAnimator,
