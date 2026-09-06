@@ -661,14 +661,34 @@ jobs:
                   return True
               except TimeoutError:
                   print(f"PROBE {mode}/{label}: TIMEOUT after {ptimeout}s", flush=True)
-                  try:
-                      print(f"SERVER-TAIL {mode}:\n" +
-                            open(f"smoke-out/site-{mode}-server.log", errors="replace").read()[-1500:],
-                            flush=True)
-                  except OSError:
-                      pass
                   return False
           if not probe("Browser.getVersion", None, 10, "getVersion"):
+              # Pinpoint the freeze: same connection, new connection, HTTP,
+              # then dump the servo thread list from /proc.
+              try:
+                  ws.send({"id": 999901, "method": "Browser.getVersion"})
+                  r = json.loads(ws.recv_msg())
+                  print(f"DIAG {mode}/same-conn retry: {json.dumps(r)[:200]}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/same-conn retry: {e!r}", flush=True)
+              try:
+                  ws2 = WS(ver["webSocketDebuggerUrl"])
+                  ws2.send({"id": 999902, "method": "Browser.getVersion"})
+                  r = json.loads(ws2.recv_msg())
+                  print(f"DIAG {mode}/new-conn probe: {json.dumps(r)[:200]}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/new-conn probe: {e!r}", flush=True)
+              try:
+                  v = http_get("/json/version")
+                  print(f"DIAG {mode}/http-after: OK {v.get('webSocketDebuggerUrl')}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/http-after: {e!r}", flush=True)
+              try:
+                  print(f"SERVER-TAIL {mode}:\n" +
+                        open(f"smoke-out/site-{mode}-server.log", errors="replace").read()[-1500:],
+                        flush=True)
+              except OSError:
+                  pass
               sys.exit(1)
           if not probe("Target.getTargets", None, 15, "getTargets"):
               sys.exit(1)
@@ -783,12 +803,25 @@ jobs:
             kill $pid 2>/dev/null || true
             pkill -f "remote-debugging-port $port" 2>/dev/null || true
             wait $pid 2>/dev/null || true
-            sleep 2
             if [ "$failed" = "1" ]; then
               echo "### mode $mode FAILED"; tail -30 "smoke-out/site-$mode-server.log"; SITE_FAILED=1
+              SPID=$(pgrep -f "remote-debugging-port $port" | head -1)
+              if [ -n "$SPID" ] && [ -d "/proc/$SPID/task" ]; then
+                echo "### THREAD DUMP for servo pid $SPID:"
+                for t in "/proc/$SPID/task/"*; do
+                  TID=$(basename "$t")
+                  COMM=$(cat "$t/comm" 2>/dev/null || echo '?')
+                  STATE=$(awk '{print $3}' "$t/stat" 2>/dev/null || echo '?')
+                  WCHAN=$(cat "$t/wchan" 2>/dev/null || echo '?')
+                  echo "  tid=$TID comm=$COMM state=$STATE wchan=$WCHAN"
+                done | sort -k3 | head -60
+              else
+                echo "### servo process for port $port is gone (crashed or exited)"
+              fi
             else
               echo "### mode $mode PASSED"
             fi
+            sleep 2
           }
           run_mode headless 9222 "-z"
           run_mode windowed 9223 ""
