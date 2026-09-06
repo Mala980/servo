@@ -836,18 +836,28 @@ jobs:
           PYEOF
             if [ "$failed" = "1" ]; then
               echo "### mode $mode FAILED"; tail -30 "smoke-out/site-$mode-server.log"; SITE_FAILED=1
-              SPID=$(pgrep -f "remote-debugging-port $port" | head -1 || true)
+              SPID=""
+              for cand in $(pgrep -f "remote-debugging-port $port" 2>/dev/null || true); do
+                COMM_CAND=$(cat "/proc/$cand/comm" 2>/dev/null || echo '?')
+                echo "### candidate pid $cand comm=$COMM_CAND"
+                case "$COMM_CAND" in
+                  servoshell|servo) SPID=$cand ;;
+                esac
+              done
               if [ -n "$SPID" ] && [ -d "/proc/$SPID/task" ]; then
-                echo "### THREAD DUMP for servo pid $SPID:"
+                NTHREADS=$(ls "/proc/$SPID/task" | wc -l)
+                echo "### THREAD DUMP for servo pid $SPID ($NTHREADS threads):"
+                ss -tan 2>/dev/null | grep -E "9222|9223" || echo "  (no matching sockets)"
                 for t in "/proc/$SPID/task/"*; do
                   TID=$(basename "$t")
                   COMM=$(cat "$t/comm" 2>/dev/null || echo '?')
                   STATE=$(awk '{print $3}' "$t/stat" 2>/dev/null || echo '?')
                   WCHAN=$(cat "$t/wchan" 2>/dev/null || echo '?')
                   echo "  tid=$TID comm=$COMM state=$STATE wchan=$WCHAN"
-                done | sort -k3 | head -60
+                done | sort -k3 | head -80
               else
-                echo "### servo process for port $port is gone (crashed or exited)"
+                echo "### no live servo process found for port $port"
+                ss -tan 2>/dev/null | grep -E "9222|9223" || true
               fi
               kill $pid 2>/dev/null || true
               pkill -f "remote-debugging-port $port" 2>/dev/null || true
