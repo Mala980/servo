@@ -53,7 +53,7 @@ if not targets:
 check(f"{mode} page target registered", True, f"{len(targets)} target(s)")
 
 class WS:
-    def __init__(self, url, timeout=70):
+    def __init__(self, url, timeout=5):
         parts = urlsplit(url)
         self.s = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -96,7 +96,12 @@ class WS:
         frag = bytearray()
         while True:
             b1, b2 = self._read(2)
-            fin, op, ln = b2 & 0x80, b1 & 0x0F, b2 & 0x7F
+            # FIN lives in the high bit of the FIRST byte; the high bit of
+            # the second byte is the MASK bit, which is always 0 on
+            # server->client frames. Reading fin from b2 made every text
+            # frame look like a non-final fragment, so recv_msg swallowed
+            # every reply and every probe timed out (run 34049320472).
+            fin, op, ln = b1 & 0x80, b1 & 0x0F, b2 & 0x7F
             if ln == 126:
                 ln = struct.unpack(">H", self._read(2))[0]
             elif ln == 127:
