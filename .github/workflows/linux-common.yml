@@ -661,21 +661,55 @@ jobs:
                   return True
               except TimeoutError:
                   print(f"PROBE {mode}/{label}: TIMEOUT after {ptimeout}s", flush=True)
+                  print(f"DIAG {mode}: server sent {len(events)} unsolicited message(s) so far:",
+                        [json.dumps(e)[:120] for e in events[-5:]], flush=True)
                   return False
           if not probe("Browser.getVersion", None, 10, "getVersion"):
               # Pinpoint the freeze: same connection, new connection, HTTP,
               # then dump the servo thread list from /proc.
               try:
                   ws.send({"id": 999901, "method": "Browser.getVersion"})
-                  r = json.loads(ws.recv_msg())
-                  print(f"DIAG {mode}/same-conn retry: {json.dumps(r)[:200]}", flush=True)
+                  deadline = time.time() + 15
+                  got = []
+                  while time.time() < deadline:
+                      try:
+                          ws.s.settimeout(3)
+                          raw = ws.recv_msg()
+                      except (socket.timeout, TimeoutError):
+                          continue
+                      except (OSError, EOFError) as e:
+                          print(f"DIAG {mode}/same-conn retry: socket error {e!r}", flush=True)
+                          break
+                      got.append(raw)
+                      print(f"DIAG {mode}/same-conn RX: {raw[:200]}", flush=True)
+                      if json.loads(raw).get("id") == 999901:
+                          print(f"DIAG {mode}/same-conn retry: REPLY ARRIVED", flush=True)
+                          break
+                  if not got:
+                      print(f"DIAG {mode}/same-conn retry: NO message in 15s", flush=True)
               except Exception as e:
                   print(f"DIAG {mode}/same-conn retry: {e!r}", flush=True)
               try:
                   ws2 = WS(ver["webSocketDebuggerUrl"])
                   ws2.send({"id": 999902, "method": "Browser.getVersion"})
-                  r = json.loads(ws2.recv_msg())
-                  print(f"DIAG {mode}/new-conn probe: {json.dumps(r)[:200]}", flush=True)
+                  deadline = time.time() + 15
+                  got = []
+                  while time.time() < deadline:
+                      try:
+                          ws2.s.settimeout(3)
+                          raw = ws2.recv_msg()
+                      except (socket.timeout, TimeoutError):
+                          continue
+                      except (OSError, EOFError) as e:
+                          print(f"DIAG {mode}/new-conn probe: socket error {e!r}", flush=True)
+                          break
+                      got.append(raw)
+                      print(f"DIAG {mode}/new-conn RX: {raw[:200]}", flush=True)
+                      if json.loads(raw).get("id") == 999902:
+                          print(f"DIAG {mode}/new-conn probe: REPLY ARRIVED", flush=True)
+                          break
+                  if not got:
+                      print(f"DIAG {mode}/new-conn probe: NO message in 15s", flush=True)
               except Exception as e:
                   print(f"DIAG {mode}/new-conn probe: {e!r}", flush=True)
               try:
@@ -800,12 +834,9 @@ jobs:
               print("Failed checks:", [x["name"] for x in bad])
               sys.exit(1)
           PYEOF
-            kill $pid 2>/dev/null || true
-            pkill -f "remote-debugging-port $port" 2>/dev/null || true
-            wait $pid 2>/dev/null || true
             if [ "$failed" = "1" ]; then
               echo "### mode $mode FAILED"; tail -30 "smoke-out/site-$mode-server.log"; SITE_FAILED=1
-              SPID=$(pgrep -f "remote-debugging-port $port" | head -1)
+              SPID=$(pgrep -f "remote-debugging-port $port" | head -1 || true)
               if [ -n "$SPID" ] && [ -d "/proc/$SPID/task" ]; then
                 echo "### THREAD DUMP for servo pid $SPID:"
                 for t in "/proc/$SPID/task/"*; do
@@ -818,9 +849,14 @@ jobs:
               else
                 echo "### servo process for port $port is gone (crashed or exited)"
               fi
+              kill $pid 2>/dev/null || true
+              pkill -f "remote-debugging-port $port" 2>/dev/null || true
             else
               echo "### mode $mode PASSED"
+              kill $pid 2>/dev/null || true
+              pkill -f "remote-debugging-port $port" 2>/dev/null || true
             fi
+            wait $pid 2>/dev/null || true
             sleep 2
           }
           run_mode headless 9222 "-z"
