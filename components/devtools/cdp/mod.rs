@@ -476,14 +476,12 @@ impl CdpServer {
             let Ok(text) = serde_json::to_string(&message) else {
                 continue;
             };
+            let written_len = text.len();
+            let written_head: String = text.chars().take(120).collect();
             if let Err(error) = connection.writer.write_message(&WsMessage::Text(text)) {
                 println!("CDP: failed to write CDP message to connection {connection_id}: {error}");
             } else {
-                println!(
-                    "CDP: wrote {} byte(s) to connection {connection_id}: {}",
-                    text.len(),
-                    &text[..text.len().min(120)]
-                );
+                println!("CDP: wrote {written_len} byte(s) to connection {connection_id}: {written_head}");
             }
         }
     }
