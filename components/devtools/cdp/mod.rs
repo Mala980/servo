@@ -33,7 +33,7 @@ use devtools_traits::{
     get_time_stamp,
 };
 use embedder_traits::EmbedderProxy;
-use log::{debug, info, warn};
+use log::{info, warn};
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
 use servo_base::generic_channel::GenericSender;
