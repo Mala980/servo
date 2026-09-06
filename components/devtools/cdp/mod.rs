@@ -139,8 +139,9 @@ fn acceptor_loop(listener: TcpListener, server: Arc<Mutex<CdpServer>>) {
         let Ok(stream) = stream else {
             continue;
         };
+        println!("CDP: accepted a TCP connection");
         if let Err(error) = handle_incoming_connection(stream, &server) {
-            debug!("Rejected CDP connection: {error}");
+            println!("CDP: connection rejected: {error}");
         }
     }
 }
@@ -176,6 +177,7 @@ fn handle_incoming_connection(
     };
 
     let ws_stream = WsStream::accept_with_key(stream, &key)?;
+    println!("CDP: WebSocket handshake completed");
     register_connection(server, ws_stream);
     Ok(())
 }
@@ -240,6 +242,7 @@ fn register_connection(server: &Arc<Mutex<CdpServer>>, ws_stream: WsStream) {
     // The client handler thread needs an owned handle; clone it here, since
     // capturing the reference inside the closure would not be `'static`.
     let server = Arc::clone(server);
+    println!("CDP: connection {connection_id} registered, spawning client handler");
     thread::Builder::new()
         .name("CdpClientHandler".to_owned())
         .spawn(move || client_handler_loop(server, connection_id, receiver))
@@ -253,21 +256,31 @@ fn client_handler_loop(
     connection_id: u64,
     mut receiver: WsReceiver,
 ) {
+    println!("CDP: client handler for connection {connection_id} started");
     loop {
         match receiver.read_message() {
             Ok(Some(WsMessage::Text(text))) => {
+                println!("CDP: connection {connection_id} received a message ({} bytes)", text.len());
                 let Ok(message) = serde_json::from_str::<Value>(&text) else {
-                    debug!("Ignoring malformed CDP message: {text}");
+                    println!("CDP: connection {connection_id} sent a malformed message");
                     continue;
                 };
                 server.lock().unwrap().handle_client_message(connection_id, &message);
             },
             // Binary, ping and pong frames are handled by the receiver.
             Ok(Some(_)) => {},
-            Ok(None) | Err(_) => break,
+            Ok(None) => {
+                println!("CDP: connection {connection_id} closed by the client");
+                break;
+            },
+            Err(error) => {
+                println!("CDP: connection {connection_id} read error: {error}");
+                break;
+            },
         }
     }
     server.lock().unwrap().remove_connection(connection_id);
+    println!("CDP: connection {connection_id} removed");
 }
 
 /// The state of a WebSocket connection to a CDP client.
@@ -451,15 +464,20 @@ impl CdpServer {
 
     /// Delivers all queued messages.
     fn flush(&mut self) {
+        let queued = self.outbox.len();
+        if queued > 0 {
+            println!("CDP: flushing {queued} queued message(s)");
+        }
         for (connection_id, message) in std::mem::take(&mut self.outbox) {
             let Some(connection) = self.connections.get_mut(&connection_id) else {
+                println!("CDP: dropping queued message for unknown connection {connection_id}");
                 continue;
             };
             let Ok(text) = serde_json::to_string(&message) else {
                 continue;
             };
             if let Err(error) = connection.writer.write_message(&WsMessage::Text(text)) {
-                debug!("Failed to write CDP message: {error}");
+                println!("CDP: failed to write CDP message to connection {connection_id}: {error}");
             }
         }
     }

@@ -114,6 +114,9 @@ impl CdpServer {
             return;
         }
 
+        println!(
+            "CDP: handling message id={id:?} method={method} session={session_id:?}"
+        );
         match session_id {
             Some(session_id) => {
                 self.handle_session_message(connection_id, id, &method, &params, &session_id)
