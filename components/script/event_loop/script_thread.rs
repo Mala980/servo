@@ -157,7 +157,7 @@ use crate::mime::{APPLICATION, CHARSET, MimeExt, TEXT, XML};
 use crate::modules::script_module::ScriptFetchOptions;
 use crate::navigation::{InProgressLoad, NavigationListener};
 use crate::realms::enter_auto_realm;
-use crate::runtime::microtask::{MicrotaskQueue, MicrotaskRunnable};
+use crate::runtime::job_queue::{MicrotaskRunnable, job_queue_microtask_checkpoint};
 use crate::runtime::script_runtime::{
     IntroductionType, Runtime, ScriptThreadEventCategory, ThreadSafeJSContext, get_reports,
 };
@@ -325,9 +325,6 @@ pub struct ScriptThread {
     /// List of pipelines that have been owned and closed by this script thread.
     #[no_trace]
     closed_pipelines: DomRefCell<FxHashSet<PipelineId>>,
-
-    /// <https://html.spec.whatwg.org/multipage/#microtask-queue>
-    microtask_queue: Rc<MicrotaskQueue>,
 
     mutation_observers: Rc<ScriptMutationObservers>,
 
@@ -541,10 +538,6 @@ impl ScriptThread {
         with_script_thread(|script_thread| script_thread.mutation_observers.clone())
     }
 
-    pub(crate) fn microtask_queue() -> Rc<MicrotaskQueue> {
-        with_script_thread(|script_thread| script_thread.microtask_queue.clone())
-    }
-
     pub(crate) fn shared_style_locks(&self) -> &SharedRwLocks {
         &self.shared_style_locks
     }
@@ -575,9 +568,7 @@ impl ScriptThread {
 
     // https://html.spec.whatwg.org/multipage/#await-a-stable-state
     pub(crate) fn await_stable_state(cx: &JSContext, task: Box<dyn MicrotaskRunnable>) {
-        with_script_thread(|script_thread| {
-            script_thread.microtask_queue.enqueue(cx, task);
-        });
+        crate::runtime::job_queue::enqueue(cx, task);
     }
 
     /// Check that two origins are "similar enough",
@@ -884,7 +875,6 @@ impl ScriptThread {
             devtools_client_to_script_thread_sender: ipc_devtools_sender,
         };
 
-        let microtask_queue = runtime.microtask_queue.clone();
         #[cfg(feature = "webgpu")]
         let gpu_id_hub = Arc::new(IdentityHub::default());
 
@@ -934,7 +924,6 @@ impl ScriptThread {
                     background_hang_monitor,
                     closing,
                     timer_scheduler: Default::default(),
-                    microtask_queue,
                     js_runtime: Rc::new(runtime),
                     closed_pipelines: DomRefCell::new(FxHashSet::default()),
                     mutation_observers: Default::default(),
@@ -4002,16 +3991,46 @@ impl ScriptThread {
     /// argument until a notification is received that the fetch is complete.
     #[servo_tracing::instrument(skip_all)]
     fn pre_page_load(&self, cx: &mut js::context::JSContext, mut incomplete: InProgressLoad) {
+        let origin_from_snapshot = || -> Option<MutableOrigin> {
+            match incomplete.load_data.load_origin {
+                LoadOrigin::Script(ref snapshot) => {
+                    Some(MutableOrigin::from_snapshot(snapshot.clone()))
+                },
+                _ => None,
+            }
+        };
+
+        let preserved_origin = || -> Option<MutableOrigin> {
+            // When loading `about:blank`, `about:srcdoc` and `javascript:`
+            // URLs, the specification says that the origin should be aliased
+            // from the creator origin. This means that changes to the creator
+            // origin via things like `document.domain` are reflected in the
+            // child Document. This code attempts to look up the creator
+            // Document and alias the origin for these type of pages.
+            //
+            // TODO: This should be eliminated by not having these types of pages
+            // use the parser at at all.
+            let creator_pipeline_id = incomplete.load_data.creator_pipeline_id?;
+            Some(
+                ScriptThread::find_document(creator_pipeline_id)?
+                    .origin()
+                    .clone(),
+            )
+        };
+
         let url_str = incomplete.load_data.url.as_str();
         if url_str == "about:blank" || incomplete.load_data.js_eval_result.is_some() {
-            self.start_synchronous_page_load(cx, incomplete);
+            let source_origin = preserved_origin().or(origin_from_snapshot());
+            self.start_synchronous_page_load(cx, incomplete, source_origin);
             return;
         }
         if url_str == "about:srcdoc" {
-            self.page_load_about_srcdoc(cx, incomplete);
+            let source_origin = preserved_origin().or(origin_from_snapshot());
+            self.page_load_about_srcdoc(cx, incomplete, source_origin);
             return;
         }
 
+        let source_origin = origin_from_snapshot();
         let context = ParserContext::new(
             incomplete.webview_id,
             incomplete.pipeline_id,
@@ -4019,7 +4038,7 @@ impl ScriptThread {
             incomplete.load_data.creation_sandboxing_flag_set,
             incomplete.parent_info,
             incomplete.target_snapshot_params,
-            incomplete.load_data.load_origin.clone(),
+            source_origin,
         );
         self.incomplete_parser_contexts
             .0
@@ -4230,6 +4249,7 @@ impl ScriptThread {
         &self,
         cx: &mut js::context::JSContext,
         mut incomplete: InProgressLoad,
+        source_origin: Option<MutableOrigin>,
     ) {
         let mut context = ParserContext::new(
             incomplete.webview_id,
@@ -4238,7 +4258,7 @@ impl ScriptThread {
             incomplete.load_data.creation_sandboxing_flag_set,
             incomplete.parent_info,
             incomplete.target_snapshot_params,
-            incomplete.load_data.load_origin.clone(),
+            source_origin,
         );
 
         let mut meta = Metadata::default(incomplete.load_data.url.clone());
@@ -4272,6 +4292,7 @@ impl ScriptThread {
         &self,
         cx: &mut js::context::JSContext,
         mut incomplete: InProgressLoad,
+        source_origin: Option<MutableOrigin>,
     ) {
         let url = ServoUrl::parse("about:srcdoc").unwrap();
         let mut meta = Metadata::default(url.clone());
@@ -4289,7 +4310,6 @@ impl ScriptThread {
         let parent_info = incomplete.parent_info;
         let about_base_url = incomplete.load_data.about_base_url.clone();
         let target_snapshot_params = incomplete.target_snapshot_params;
-        let load_origin = incomplete.load_data.load_origin.clone();
         self.incomplete_loads.borrow_mut().push(incomplete);
 
         let mut context = ParserContext::new(
@@ -4299,7 +4319,7 @@ impl ScriptThread {
             creation_sandboxing_flag_set,
             parent_info,
             target_snapshot_params,
-            load_origin,
+            source_origin,
         );
         context.process_response(self, cx, Ok(FetchMetadata::Unfiltered(meta)));
         context.set_policy_container(policy_container.as_ref());
@@ -4419,9 +4439,7 @@ impl ScriptThread {
     }
 
     pub(crate) fn enqueue_microtask(cx: &js::context::JSContext, job: Box<dyn MicrotaskRunnable>) {
-        with_script_thread(|script_thread| {
-            script_thread.microtask_queue.enqueue(cx, job);
-        });
+        crate::runtime::job_queue::enqueue(cx, job);
     }
 
     pub(crate) fn perform_a_microtask_checkpoint(&self, cx: &mut js::context::JSContext) {
@@ -4434,7 +4452,7 @@ impl ScriptThread {
                 .map(|(_id, document)| DomRoot::from_ref(document.window().upcast()))
                 .collect();
 
-            self.microtask_queue.checkpoint(cx, globals)
+            job_queue_microtask_checkpoint(cx, globals)
         }
     }
 

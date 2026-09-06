@@ -18,7 +18,9 @@ use servo_base::text::{RangeAny, Utf16CodeUnits, Utf32CodeUnits, Utf32CodeUnitsO
 use crate::dom::abstractrange::bp_position;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
 use crate::dom::bindings::codegen::Bindings::RangeBinding::RangeMethods;
-use crate::dom::bindings::codegen::Bindings::SelectionBinding::SelectionMethods;
+use crate::dom::bindings::codegen::Bindings::SelectionBinding::{
+    GetComposedRangesOptions, SelectionMethods,
+};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
@@ -31,6 +33,7 @@ use crate::dom::iterators::PrePostIteration;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::range::Range;
 use crate::dom::selection_range::{SelectionBoundary, SelectionRange};
+use crate::dom::staticrange::StaticRange;
 use crate::dom::types::ShadowRoot;
 use crate::dom::{CharacterData, FlatTreeParent, NodeDamage, NodeFlags};
 
@@ -126,12 +129,16 @@ impl Selection {
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
-    fn set_range(&self, no_gc: &NoGC, new_range: Option<SelectionRange>) -> bool {
+    fn set_range(&self, _no_gc: &NoGC, new_range: Option<SelectionRange>) -> bool {
         let changed;
         {
             let mut range = self.range.borrow_mut();
             changed = *range != new_range;
             *range = new_range;
+
+            if range.is_none() {
+                self.direction.set(Direction::Directionless);
+            }
         }
 
         // Any changes must unconditionally install a new live range.
@@ -139,7 +146,8 @@ impl Selection {
 
         if changed {
             self.selection_boundaries_changed();
-            self.assert_valid_selection(no_gc);
+            #[cfg(debug_assertions)]
+            self.assert_valid_selection(_no_gc);
         }
 
         changed
@@ -418,10 +426,8 @@ impl Selection {
         (range.end_container(), range.end_offset())
     }
 
+    #[cfg(debug_assertions)]
     fn assert_valid_selection(&self, no_gc: &NoGC) {
-        #[cfg(not(debug_assertions))]
-        return;
-
         let range_borrow = self.range.borrow();
         let Some(range) = range_borrow.as_ref() else {
             return;
@@ -441,10 +447,8 @@ impl Selection {
         );
     }
 
+    #[cfg(debug_assertions)]
     fn assert_valid_selection_and_live_range(&self, no_gc: &NoGC) {
-        #[cfg(not(debug_assertions))]
-        return;
-
         self.assert_valid_selection(no_gc);
 
         let Some(active_range) = self.live_range.get() else {
@@ -477,6 +481,7 @@ impl Selection {
     /// > The active range is the range of the selection given by calling
     /// > getSelection() on the context object. (Thus the active range may be null.)
     pub(crate) fn active_range(&self, cx: &mut JSContext) -> Option<DomRoot<Range>> {
+        #[cfg(debug_assertions)]
         self.assert_valid_selection_and_live_range(cx.no_gc());
 
         if let Some(active_range) = self.live_range.get() {
@@ -916,6 +921,18 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
         }
     }
 
+    /// <https://w3c.github.io/selection-api/#dom-selection-direction>
+    fn Direction(&self) -> DOMString {
+        // > The attribute must return "none" if this is empty or this selection is
+        // > directionless. "forward" if this selection's direction is forwards and
+        // > "backward" if this selection's direction is backwards.
+        match self.direction.get() {
+            Direction::Directionless => DOMString::from_static("none"),
+            Direction::Forwards => DOMString::from_static("forward"),
+            Direction::Backwards => DOMString::from_static("backward"),
+        }
+    }
+
     /// <https://w3c.github.io/selection-api/#dom-selection-getrangeat>
     fn GetRangeAt(&self, cx: &mut JSContext, index: u32) -> Fallible<DomRoot<Range>> {
         // > The method must throw an IndexSizeError exception if index is not 0, or if this
@@ -983,6 +1000,87 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
     fn Empty(&self, no_gc: &NoGC) {
         // > The method must be an alias, and behave identically, to removeAllRanges().
         self.RemoveAllRanges(no_gc);
+    }
+
+    /// <https://w3c.github.io/selection-api/#dom-selection-getcomposedranges>
+    fn GetComposedRanges(
+        &self,
+        cx: &mut JSContext,
+        options: &GetComposedRangesOptions,
+    ) -> Vec<DomRoot<StaticRange>> {
+        // Step 1. If this is empty, return an empty array.
+        let borrowed_range = self.range.borrow();
+        let Some(range) = borrowed_range.as_ref() else {
+            return Vec::new();
+        };
+
+        // Step 2. Otherwise, let startNode be start node of the range associated with
+        // this, and let startOffset be start offset of the range.
+        let mut start_node = range.start.container.as_rooted();
+        let mut start_offset = range.start.offset;
+
+        let is_ancestor_of_provided_shadow_roots = |shadow_root: &ShadowRoot| {
+            let shadow_root_node = shadow_root.upcast::<Node>();
+            options.shadowRoots.iter().any(|option_shadow_root| {
+                shadow_root_node
+                    .is_shadow_including_inclusive_ancestor_of(option_shadow_root.upcast())
+            })
+        };
+
+        // Step 3. While startNode is a node, startNode's root is a shadow root, and
+        // startNode's root is not a shadow-including inclusive ancestor of any of
+        // options["shadowRoots"], repeat these steps:
+        while let Some(containing_shadow_root) = start_node.containing_shadow_root() &&
+            !is_ancestor_of_provided_shadow_roots(&containing_shadow_root)
+        {
+            // Step 3.1. Set startOffset to index of startNode's root's host.
+            let host = DomRoot::upcast::<Node>(containing_shadow_root.Host());
+            start_offset = host.index();
+
+            // Step 3.2. Set startNode to startNode's root's host's parent.
+            // See <https://github.com/w3c/selection-api/issues/161> for why
+            // we always know that the start_node is a node.
+            start_node = host
+                .GetParentNode()
+                .expect("The host should always have a parent node");
+        }
+
+        // Step 4. Let endNode be end node of the range associated with this, and let
+        // endOffset be end offset of the range.
+        let mut end_node = range.end.container.as_rooted();
+        let mut end_offset = range.end.offset;
+
+        // Step 5. While endNode is a node, endNode's root is a shadow root, and endNode's
+        // root is not a shadow-including inclusive ancestor of any of
+        // options["shadowRoots"], repeat these steps:
+        while let Some(containing_shadow_root) = end_node.containing_shadow_root() &&
+            !is_ancestor_of_provided_shadow_roots(&containing_shadow_root)
+        {
+            // Step 5.1. Set endOffset to index of endNode's root's host plus 1.
+            let host = DomRoot::upcast::<Node>(containing_shadow_root.Host());
+            end_offset = host.index() + 1;
+
+            // Step 5.2. Set endNode to endNode's root's host's parent.
+            // See <https://github.com/w3c/selection-api/issues/161> for why
+            // we always know that the end_node is a node.
+            end_node = host
+                .GetParentNode()
+                .expect("The host should always have a parent node.");
+        }
+
+        drop(borrowed_range);
+
+        // Step 6. Return an array consisting of new StaticRange whose start node is
+        // startNode, start offset is startOffset, end node is endNode, and end offset is
+        // endOffset.
+        vec![DomRoot::from_ref(&StaticRange::new(
+            cx,
+            &self.document,
+            &start_node,
+            start_offset,
+            &end_node,
+            end_offset,
+        ))]
     }
 
     /// <https://w3c.github.io/selection-api/#dom-selection-collapse>

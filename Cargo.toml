@@ -140,7 +140,7 @@ inventory = "0.3.24"
 ipc-channel = "0.23"
 itertools = "0.15"
 jni = "0.22"
-js = { package = "mozjs", version = "=0.25.0", default-features = false, features = ["intl", "libz-sys"] }
+js = { package = "mozjs", version = "=0.26.0", default-features = false, features = ["intl", "libz-sys"] }
 k12 = "0.5"
 keccak = "0.2"
 keyboard-types = { version = "0.8.3", features = ["serde", "webdriver"] }
@@ -276,7 +276,7 @@ vello = "0.10"
 vello_cpu = { version = "0.2.0", features = ["multithreading"] }
 warp = "0.4.2"
 web_atoms = "0.2.6"
-webdriver = { version = "0.54.0", default-features = false }
+webdriver = { version = "0.54.0" }
 webpki-roots = "1.0"
 webrender = { version = "0.70", features = ["serde"] }
 webrender_api = "0.70"
