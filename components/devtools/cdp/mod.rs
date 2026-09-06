@@ -478,6 +478,12 @@ impl CdpServer {
             };
             if let Err(error) = connection.writer.write_message(&WsMessage::Text(text)) {
                 println!("CDP: failed to write CDP message to connection {connection_id}: {error}");
+            } else {
+                println!(
+                    "CDP: wrote {} byte(s) to connection {connection_id}: {}",
+                    text.len(),
+                    &text[..text.len().min(120)]
+                );
             }
         }
     }

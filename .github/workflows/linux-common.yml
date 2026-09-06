@@ -664,7 +664,25 @@ jobs:
                   print(f"DIAG {mode}: server sent {len(events)} unsolicited message(s) so far:",
                         [json.dumps(e)[:120] for e in events[-5:]], flush=True)
                   return False
+          # First try a functional-style first message (Target.getTargets,
+          # which always works there); then the browser-level getVersion.
+          if not probe("Target.getTargets", None, 15, "getTargets-first"):
+              print(f"DIAG {mode}: getTargets-first also failed", flush=True)
           if not probe("Browser.getVersion", None, 10, "getVersion"):
+              # Wire-level diagnosis: is the receive buffer silently
+              # holding bytes (framing desync), and does a WS ping
+              # round-trip work on this connection?
+              try:
+                  print(f"DIAG {mode}/residual-buffer: {ws.buf[:120]!r}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/residual-buffer: {e!r}", flush=True)
+              try:
+                  ws.s.settimeout(5)
+                  ws.s.sendall(b"\x89\x80" + os.urandom(4))
+                  pong = ws.recv_msg()
+                  print(f"DIAG {mode}/ws-ping: got {pong[:80]!r}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/ws-ping: {e!r}", flush=True)
               # Pinpoint the freeze: same connection, new connection, HTTP,
               # then dump the servo thread list from /proc.
               try:
