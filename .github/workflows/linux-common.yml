@@ -490,7 +490,7 @@ jobs:
               > "smoke-out/site-$mode-server.log" 2>&1 &
             pid=$!
             timeout 1050 python3 - "$mode" "$port" <<'PYEOF' || failed=1
-          import base64, hashlib, json, os, socket, struct, sys, time, urllib.request
+          import base64, hashlib, json, os, socket, struct, subprocess, sys, time, urllib.request
           from urllib.parse import urlsplit
 
           mode, port = sys.argv[1], int(sys.argv[2])
@@ -676,6 +676,15 @@ jobs:
                   print(f"DIAG {mode}/residual-buffer: {ws.buf[:120]!r}", flush=True)
               except Exception as e:
                   print(f"DIAG {mode}/residual-buffer: {e!r}", flush=True)
+              try:
+                  ss_out = subprocess.run(["ss", "-tanp"], capture_output=True, text=True,
+                                          timeout=10).stdout
+                  queues = [l for l in ss_out.splitlines() if "9222" in l or "9223" in l]
+                  print(f"DIAG {mode}/socket-queues (Send-QRecv-Q):", flush=True)
+                  for l in queues:
+                      print(f"  {l.strip()}", flush=True)
+              except Exception as e:
+                  print(f"DIAG {mode}/socket-queues: {e!r}", flush=True)
               try:
                   ws.s.settimeout(5)
                   ws.s.sendall(b"\x89\x80" + os.urandom(4))
