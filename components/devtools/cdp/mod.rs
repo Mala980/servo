@@ -615,7 +615,7 @@ impl CdpServer {
                 .targets
                 .iter()
                 .find(|(bctx, target)| {
-                    target.webview_id == webview_id && *bctx != browsing_context_id
+                    target.webview_id == webview_id && **bctx != browsing_context_id
                 })
                 .map(|(bctx, _)| *bctx);
             if let Some(old_bctx) = existing_bctx &&
