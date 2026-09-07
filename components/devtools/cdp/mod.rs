@@ -604,8 +604,43 @@ impl CdpServer {
         // A target id may have been pre-assigned by `Target.createTarget`,
         // which hands the string out before the browsing context exists.
         let pre_assigned_target_id = self.pending_targets.remove(&webview_id);
+        // A navigation can register the new global under a different
+        // browsing-context id. The CDP target - and every session attached
+        // to it - must keep following the webview; otherwise the session
+        // keeps pointing at the torn-down pipeline and every evaluation
+        // on the target times out.
+        let mut migrated_previous_pipeline: Option<PipelineId> = None;
+        if !self.targets.contains_key(&browsing_context_id) {
+            let existing_bctx = self
+                .targets
+                .iter()
+                .find(|(bctx, target)| {
+                    target.webview_id == webview_id && *bctx != browsing_context_id
+                })
+                .map(|(bctx, _)| *bctx);
+            if let Some(old_bctx) = existing_bctx &&
+                let Some(mut target) = self.targets.remove(&old_bctx)
+            {
+                migrated_previous_pipeline = target.current_pipeline;
+                let target_id_string = target.target_id_string.clone();
+                self.target_ids.remove(&target_id_string);
+                self.target_ids.insert(target_id_string.clone(), browsing_context_id);
+                target.current_pipeline = Some(pipeline_id);
+                target.title = page_info.title.clone();
+                target.url = page_info.url.to_string();
+                println!(
+                    "CDP: target {} migrated from browsing context {old_bctx:?} to {browsing_context_id:?} after navigation",
+                    target_id_string
+                );
+                self.targets.insert(browsing_context_id, target);
+            }
+        }
         let previous_pipeline = if let Some(target) = self.targets.get_mut(&browsing_context_id) {
-            let previous = target.current_pipeline;
+            let previous = if migrated_previous_pipeline.is_some() {
+                migrated_previous_pipeline
+            } else {
+                target.current_pipeline
+            };
             target.current_pipeline = Some(pipeline_id);
             target.title = page_info.title.clone();
             target.url = page_info.url.to_string();

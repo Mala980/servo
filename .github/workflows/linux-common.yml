@@ -390,10 +390,12 @@ jobs:
               # The first evaluation can race the navigation started by
               # Target.createTarget: it may land in a pipeline that is being
               # torn down and never get answered. Retry instead of failing.
+              # The client timeout must exceed the server's 60s evaluation
+              # timeout so the server's error reply reaches this attempt.
               last = None
-              for attempt in range(3):
+              for attempt in range(2):
                   try:
-                      return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid)
+                      return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid, timeout=80)
                   except TimeoutError as e:
                       last = e
                       print(f"EVAL-RETRY: attempt {attempt + 1} timed out ({expr[:40]})", flush=True)
