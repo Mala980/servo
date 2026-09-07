@@ -451,6 +451,14 @@ impl RunningAppState {
 
         self.servo.spin_event_loop();
 
+        // Automation commands (from the WebDriver or Chrome DevTools
+        // Protocol servers) are re-queued onto the webdriver channel by
+        // this very spin (`WebViewDelegate::handle_webdriver_command`),
+        // so they are only visible here afterwards. With a winit
+        // `ControlFlow::Wait` loop the next pump may never come, which
+        // left `Target.createTarget` waiting forever in a headed browser.
+        self.handle_webdriver_messages(create_platform_window);
+
         for window in self.windows.borrow().values() {
             window.update_and_request_repaint_if_necessary(self);
         }

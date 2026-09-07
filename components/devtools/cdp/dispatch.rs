@@ -384,10 +384,14 @@ impl CdpServer {
                     .send(embedder_traits::EmbedderMsg::WebDriverCommand(
                         WebDriverCommandMsg::LoadUrl(webview_id, url.into_url(), load_status_sender),
                     ));
-                self.send_reply_to_connection(
-                    connection_id,
-                    id,
-                    json!({ "targetId": target_id_string }),
+                // Hold the reply back until the browsing context registers
+                // (released in `handle_new_global`). Replying earlier let
+                // clients attach to a target id the server did not know
+                // about yet ("No target with given id found").
+                self.pending_create_replies
+                    .insert(webview_id, (connection_id, id));
+                println!(
+                    "CDP: Target.createTarget: webview created, reply deferred until target registration"
                 );
             },
             "Target.closeTarget" => {

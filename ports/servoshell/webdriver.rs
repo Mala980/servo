@@ -136,8 +136,13 @@ impl RunningAppState {
             return;
         };
 
+        let mut handled = 0;
         while let Ok(msg) = webdriver_receiver.try_recv() {
+            handled += 1;
             self.handle_webdriver_command(msg, create_platform_window);
+        }
+        if handled > 0 {
+            println!("WD: processed {handled} automation command(s) this spin");
         }
     }
 

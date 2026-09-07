@@ -260,6 +260,13 @@ impl WsStream {
         Ok(Self { receiver, sender })
     }
 
+    /// Removes the handshake-phase read timeout so the reader half can
+    /// block indefinitely waiting for client messages.
+    pub(crate) fn clear_read_timeout(&self) {
+        let _ = self.receiver.lock().unwrap().set_read_timeout(None);
+        let _ = self.sender.lock().unwrap().set_read_timeout(None);
+    }
+
     /// Splits the stream into an independent receiver and writer half.
     pub(crate) fn split(self) -> (WsReceiver, WsWriter) {
         (

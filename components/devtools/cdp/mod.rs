@@ -140,9 +140,17 @@ fn acceptor_loop(listener: TcpListener, server: Arc<Mutex<CdpServer>>) {
             continue;
         };
         println!("CDP: accepted a TCP connection");
-        if let Err(error) = handle_incoming_connection(stream, &server) {
-            println!("CDP: connection rejected: {error}");
-        }
+        let server = Arc::clone(&server);
+        // Handle every connection on its own thread: a silent or slow
+        // client must never block the accept loop. (When the loop did
+        // block, the whole debugging port became unreachable.)
+        let _ = thread::Builder::new()
+            .name("CdpSetup".to_owned())
+            .spawn(move || {
+                if let Err(error) = handle_incoming_connection(stream, &server) {
+                    println!("CDP: connection rejected: {error}");
+                }
+            });
     }
 }
 
@@ -152,6 +160,9 @@ fn handle_incoming_connection(
     mut stream: TcpStream,
     server: &Arc<Mutex<CdpServer>>,
 ) -> Result<(), std::io::Error> {
+    // Bound the discovery/handshake phase: a client that connects but
+    // never sends a request must not tie up its handling thread forever.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let (path, headers) = websocket::read_http_request(&mut stream)?;
 
     let is_websocket_upgrade = headers
@@ -222,6 +233,7 @@ fn handle_http_discovery_request(
 /// Registers a new WebSocket connection with the server and spawns its
 /// reader thread, which lives as long as the connection does.
 fn register_connection(server: &Arc<Mutex<CdpServer>>, ws_stream: WsStream) {
+    ws_stream.clear_read_timeout();
     let (receiver, writer) = ws_stream.split();
     let connection_id = {
         let mut server = server.lock().unwrap();
@@ -380,6 +392,10 @@ pub(crate) struct CdpServer {
     /// browsing context has not been observed yet. Maps the webview id to
     /// the target id string that was already handed out to the client.
     pending_targets: FxHashMap<WebViewId, String>,
+    /// `Target.createTarget` replies held back until the new browsing
+    /// context registers (`NewGlobal`), so the client never receives a
+    /// target id that cannot be attached to yet.
+    pending_create_replies: FxHashMap<WebViewId, (u64, Value)>,
     /// Messages queued for delivery to connections, flushed at the end of
     /// each entry point to keep mutex critical sections free of I/O.
     outbox: Vec<(u64, Value)>,
@@ -411,6 +427,7 @@ impl CdpServer {
             network_requests: FxHashMap::default(),
             dom_nodes: FxHashMap::default(),
             pending_targets: FxHashMap::default(),
+            pending_create_replies: FxHashMap::default(),
             outbox: Vec::new(),
             embedder,
             web_socket_debugger_url,
@@ -594,11 +611,13 @@ impl CdpServer {
             target.url = page_info.url.to_string();
             previous
         } else {
+            let pre_assigned = pre_assigned_target_id.is_some();
             let target_id_string = pre_assigned_target_id.unwrap_or_else(|| {
                 let target_id_string = format!("page-{}", self.next_target_number);
                 self.next_target_number += 1;
                 target_id_string
             });
+            let reply_target_id = target_id_string.clone();
             self.target_ids
                 .insert(target_id_string.clone(), browsing_context_id);
             self.targets.insert(
@@ -612,6 +631,17 @@ impl CdpServer {
                     current_pipeline: Some(pipeline_id),
                 },
             );
+            // The target is attachable from this point on: release the
+            // `Target.createTarget` reply that was held back for it.
+            if pre_assigned &&
+                let Some((connection_id, message_id)) = self.pending_create_replies.remove(&webview_id)
+            {
+                self.send_reply_to_connection(
+                    connection_id,
+                    message_id,
+                    json!({ "targetId": reply_target_id }),
+                );
+            }
             None
         };
 

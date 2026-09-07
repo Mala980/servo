@@ -294,8 +294,15 @@ for i, site in enumerate(sites):
         if not tid:
             check(f"{name} createTarget", False, r.get("error") or r)
             continue
-        r = cmd("Target.attachToTarget", {"targetId": tid, "flatten": True})
-        sid = r.get("result", {}).get("sessionId")
+        sid = None
+        for attempt in range(5):
+            r = cmd("Target.attachToTarget", {"targetId": tid, "flatten": True})
+            sid = r.get("result", {}).get("sessionId")
+            if sid:
+                break
+            print(f"ATTACH-RETRY {mode} {name}: attempt {attempt + 1} failed: "
+                  f"{r.get('error')}", flush=True)
+            time.sleep(0.5)
         if not sid:
             for ev_ in events:
                 if ev_.get("method") == "Target.attachedToTarget" and \
@@ -306,6 +313,7 @@ for i, site in enumerate(sites):
             check(f"{name} attachToTarget", False, "no sessionId")
             continue
         expr = ("JSON.stringify({rs: document.readyState, title: document.title,"
+                " url: String(location.href),"
                 " els: document.querySelectorAll('*').length,"
                 " txt: (document.body && document.body.innerText ?"
                 " document.body.innerText.slice(0, 240) : '')})")
@@ -335,7 +343,7 @@ for i, site in enumerate(sites):
             val = r.get("result", {}).get("result", {}).get("value")
             if val:
                 m = json.loads(val)
-                if m.get("rs") == "complete":
+                if m.get("rs") == "complete" and m.get("url", "") != "about:blank":
                     metrics = m
                     break
             time.sleep(2)
