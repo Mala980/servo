@@ -387,7 +387,18 @@ jobs:
           check("Target.attachToTarget (flatten)", bool(sid), r.get("error") or sid)
 
           def ev(expr):
-              return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid)
+              # The first evaluation can race the navigation started by
+              # Target.createTarget: it may land in a pipeline that is being
+              # torn down and never get answered. Retry instead of failing.
+              last = None
+              for attempt in range(3):
+                  try:
+                      return cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True}, session=sid)
+                  except TimeoutError as e:
+                      last = e
+                      print(f"EVAL-RETRY: attempt {attempt + 1} timed out ({expr[:40]})", flush=True)
+                      time.sleep(2)
+              raise last
 
           r = ev("location.href")
           print("INITIAL-LOCATION:", r.get("result", {}).get("result", {}).get("value"), flush=True)
