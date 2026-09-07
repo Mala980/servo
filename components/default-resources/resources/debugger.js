@@ -406,6 +406,18 @@ addEventListener("eval", event => {
         findKeyByValue(debuggeesToWorkerIds, workerId) :
         findDebuggeeByPipelineId(pipelineId);
 
+    if (global === undefined && !frame) {
+        // Replying is essential: the remote-debugging server blocks until
+        // this reply arrives, and a silently dropped evaluation would
+        // time out there and poison the eval slot for later evaluations.
+        evalResult(event, {
+            serializedValue: JSON.stringify("No debuggee found for the requested pipeline"),
+            exceptionMessage: "No debuggee found for the requested pipeline",
+            hasException: true,
+        });
+        return;
+    }
+
     let noSideEffectDebugger;
     if (event.eager) {
         noSideEffectDebugger = createSideEffectFreeDebugger(global);

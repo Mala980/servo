@@ -195,11 +195,13 @@ impl DebuggerGlobalScope {
         eager: bool,
         result_sender: GenericSender<EvaluateJSReply>,
     ) {
-        assert!(
-            self.eval_result_sender
-                .replace(Some(result_sender))
-                .is_none()
-        );
+        if self.eval_result_sender.replace(Some(result_sender)).is_some() {
+            // A previous evaluation never completed (its reply went to an
+            // abandoned channel). Overwriting is the only way to keep the
+            // script thread usable; panicking here killed the thread and
+            // turned every later evaluation into a timeout.
+            warn!("debugger eval slot was still occupied; replacing it");
+        }
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm;
         let debuggee_pipeline_id =

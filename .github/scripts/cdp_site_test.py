@@ -312,11 +312,12 @@ for i, site in enumerate(sites):
         if not sid:
             check(f"{name} attachToTarget", False, "no sessionId")
             continue
+        # Cheap completion probe: readyState/title/URL only. Evaluations
+        # run under the SpiderMonkey Debugger API, which makes DOM-wide
+        # scans orders of magnitude slower; the element count is measured
+        # once, after the load is known to be complete.
         expr = ("JSON.stringify({rs: document.readyState, title: document.title,"
-                " url: String(location.href),"
-                " els: document.querySelectorAll('*').length,"
-                " txt: (document.body && document.body.innerText ?"
-                " document.body.innerText.slice(0, 240) : '')})")
+                " url: String(location.href)})")
         metrics = None
         fallback = [False, ""]
         deadline = time.time() + 120
@@ -336,7 +337,7 @@ for i, site in enumerate(sites):
                     pass
             try:
                 r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True},
-                        session=sid, timeout=25)
+                        session=sid, timeout=65)
             except TimeoutError:
                 time.sleep(2)
                 continue
@@ -347,6 +348,20 @@ for i, site in enumerate(sites):
                     metrics = m
                     break
             time.sleep(2)
+        if metrics:
+            detail = ("JSON.stringify({els: document.getElementsByTagName('*').length,"
+                      " txt: (document.body && document.body.innerText ?"
+                      " document.body.innerText.slice(0, 240) : '')})")
+            for attempt in range(2):
+                try:
+                    r = cmd("Runtime.evaluate", {"expression": detail, "returnByValue": True},
+                            session=sid, timeout=70)
+                    val = r.get("result", {}).get("result", {}).get("value")
+                    if val:
+                        metrics.update(json.loads(val))
+                        break
+                except TimeoutError:
+                    print(f"DETAIL-EVAL-RETRY {mode} {name}: attempt {attempt + 1}", flush=True)
         if fallback[0]:
             try:
                 r = cmd("Runtime.evaluate", {"expression": "location.href",

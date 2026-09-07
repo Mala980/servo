@@ -51,7 +51,7 @@ use crate::cdp::websocket::{WsMessage, WsReceiver, WsStream, WsWriter};
 
 /// How long to wait for a script thread to reply to an `Eval` or DOM request
 /// before giving up and reporting an error to the CDP client.
-const EVALUATE_TIMEOUT: Duration = Duration::from_secs(10);
+const EVALUATE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A shared handle to the CDP server, used to feed browser events into it.
 #[derive(Clone)]
