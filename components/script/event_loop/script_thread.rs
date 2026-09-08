@@ -2230,6 +2230,11 @@ impl ScriptThread {
                 )
             },
             DevtoolScriptControlMsg::Eval(code, id, frame_actor_id, eager, reply) => {
+                println!(
+                    "EVAL-TRACE: script thread got Eval for pipeline {:?} ({} bytes)",
+                    id,
+                    code.len()
+                );
                 self.debugger_global.fire_eval(
                     cx,
                     code.into(),
