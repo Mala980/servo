@@ -7,6 +7,8 @@
 //! or to a session created with `Target.attachToTarget`.
 
 use std::io::Cursor;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -78,7 +80,12 @@ const SESSION_NOOP_METHODS: &[&str] = &[
 
 impl CdpServer {
     /// Handles a message received from a CDP client on the given connection.
-    pub(super) fn handle_client_message(&mut self, connection_id: u64, message: &Value) {
+    pub(super) fn handle_client_message(
+        &mut self,
+        server: &Arc<Mutex<CdpServer>>,
+        connection_id: u64,
+        message: &Value,
+    ) {
         let id = message.get("id").and_then(Value::as_i64).map(Value::from);
         let method = message
             .get("method")
@@ -103,7 +110,7 @@ impl CdpServer {
                 .and_then(Value::as_str)
                 .and_then(|text| serde_json::from_str::<Value>(text).ok());
             match (id, inner_message) {
-                (_, Some(inner)) => self.handle_client_message(connection_id, &inner),
+                (_, Some(inner)) => self.handle_client_message(server, connection_id, &inner),
                 (Some(id), None) => self.send_error_to_connection(
                     connection_id,
                     id,
@@ -119,7 +126,14 @@ impl CdpServer {
         );
         match session_id {
             Some(session_id) => {
-                self.handle_session_message(connection_id, id, &method, &params, &session_id)
+                self.handle_session_message(
+                    server,
+                    connection_id,
+                    id,
+                    &method,
+                    &params,
+                    &session_id,
+                )
             },
             None => self.handle_browser_message(connection_id, id, &method, &params),
         }
@@ -512,6 +526,7 @@ impl CdpServer {
     /// Handles a session-scoped command.
     fn handle_session_message(
         &mut self,
+        server: &Arc<Mutex<CdpServer>>,
         connection_id: u64,
         id: Option<Value>,
         method: &str,
@@ -688,7 +703,7 @@ impl CdpServer {
                 self.send_session_reply(connection_id, id, session_id, json!({}));
             },
             "Page.captureScreenshot" => {
-                self.page_capture_screenshot(connection_id, id, session_id, params);
+                self.page_capture_screenshot(server, connection_id, id, session_id, params);
             },
             "Page.printToPDF" | "Page.startScreencast" | "Page.captureSnapshot" => {
                 self.send_session_error(
@@ -712,7 +727,7 @@ impl CdpServer {
                 self.send_session_reply(connection_id, id, session_id, json!({}));
             },
             "Runtime.evaluate" => {
-                self.runtime_evaluate(connection_id, id, session_id, params);
+                self.runtime_evaluate(server, connection_id, id, session_id, params);
             },
             "Runtime.runScript" => {
                 // Script persistence is not supported; run the source right
@@ -722,7 +737,7 @@ impl CdpServer {
                     let source = params["source"].clone();
                     params["expression"] = source;
                 }
-                self.runtime_evaluate(connection_id, id, session_id, &params);
+                self.runtime_evaluate(server, connection_id, id, session_id, &params);
             },
             "Runtime.compileScript" => {
                 // Scripts are not precompiled; hand out an unusable but
@@ -730,7 +745,7 @@ impl CdpServer {
                 self.send_session_reply(connection_id, id, session_id, json!({ "scriptId": "0" }));
             },
             "Runtime.callFunctionOn" => {
-                self.runtime_call_function_on(connection_id, id, session_id, params);
+                self.runtime_call_function_on(server, connection_id, id, session_id, params);
             },
             "Network.enable" => {
                 if let Some(session) = self.sessions.get_mut(session_id) {
@@ -1001,10 +1016,10 @@ impl CdpServer {
         self.send_session_reply(connection_id, id, session_id, result);
     }
 
-    /// Implements `Runtime.evaluate` by delegating to the script thread,
-    /// blocking until it replies.
+    /// Implements `Runtime.evaluate` by delegating to the script thread.
     fn runtime_evaluate(
         &mut self,
+        server: &Arc<Mutex<CdpServer>>,
         connection_id: u64,
         id: Option<Value>,
         session_id: &str,
@@ -1039,6 +1054,7 @@ impl CdpServer {
             return;
         };
         self.runtime_evaluate_in_pipeline(
+            server,
             connection_id,
             id,
             session_id,
@@ -1047,10 +1063,12 @@ impl CdpServer {
         );
     }
 
-    /// Evaluates an expression in the given pipeline, blocking until the
-    /// script thread replies.
+    /// Evaluates an expression in the given pipeline. The reply is awaited
+    /// on a dedicated thread so that the server mutex is not held while
+    /// waiting.
     fn runtime_evaluate_in_pipeline(
         &mut self,
+        server: &Arc<Mutex<CdpServer>>,
         connection_id: u64,
         id: Option<Value>,
         session_id: &str,
@@ -1100,27 +1118,58 @@ impl CdpServer {
             return;
         }
 
-        match port.try_recv_timeout(EVALUATE_TIMEOUT) {
-            Ok(reply) => {
-                let (result, exception_details) = evaluate_reply_to_remote_object(
-                    &reply.value,
-                    reply.has_exception,
-                    reply.exception_message.as_deref(),
-                );
-                let mut result_json = json!({ "result": result });
-                if let Some(exception_details) = exception_details {
-                    result_json["exceptionDetails"] = exception_details;
+        // Wait for the reply OFF the server mutex. While the mutex is
+        // held, the devtools thread cannot service the script -> devtools
+        // control channel, so a page that logs to the console wedges the
+        // script thread mid-send - and with it the evaluation this command
+        // is waiting for - until the wait itself times out.
+        let id = id.clone();
+        let session_id = session_id.to_owned();
+        let spawned = thread::Builder::new()
+            .name("CdpEvalWaiter".to_owned())
+            .spawn({
+                let server = Arc::clone(server);
+                move || {
+                    let outcome = match port.try_recv_timeout(EVALUATE_TIMEOUT) {
+                        Ok(reply) => {
+                            let (result, exception_details) = evaluate_reply_to_remote_object(
+                                &reply.value,
+                                reply.has_exception,
+                                reply.exception_message.as_deref(),
+                            );
+                            let mut result_json = json!({ "result": result });
+                            if let Some(exception_details) = exception_details {
+                                result_json["exceptionDetails"] = exception_details;
+                            }
+                            Ok(result_json)
+                        },
+                        Err(_) => Err(CdpError::server("Evaluation timed out")),
+                    };
+                    if let Ok(mut server) = server.lock() {
+                        match outcome {
+                            Ok(result_json) => {
+                                server.send_session_reply(
+                                    connection_id,
+                                    id,
+                                    &session_id,
+                                    result_json,
+                                );
+                            },
+                            Err(error) => {
+                                server.send_session_error(connection_id, id, &session_id, error);
+                            },
+                        }
+                        server.flush();
+                    }
                 }
-                self.send_session_reply(connection_id, id, session_id, result_json);
-            },
-            Err(_) => {
-                self.send_session_error(
-                    connection_id,
-                    id,
-                    session_id,
-                    CdpError::server("Evaluation timed out"),
-                );
-            },
+            });
+        if spawned.is_err() {
+            self.send_session_error(
+                connection_id,
+                id,
+                session_id,
+                CdpError::server("Evaluation could not be scheduled"),
+            );
         }
     }
 
@@ -1345,6 +1394,7 @@ impl CdpServer {
     /// then encoding the result as a base64 PNG.
     fn page_capture_screenshot(
         &mut self,
+        server: &Arc<Mutex<CdpServer>>,
         connection_id: u64,
         id: Option<Value>,
         session_id: &str,
@@ -1383,46 +1433,56 @@ impl CdpServer {
                 WebDriverCommandMsg::TakeScreenshot(webview_id, rect, result_sender),
             ));
 
-        let rgba_image = match result_receiver.recv_timeout(AUTOMATION_COMMAND_TIMEOUT) {
-            Ok(Ok(rgba_image)) => rgba_image,
-            Ok(Err(error)) => {
-                self.send_session_error(
-                    connection_id,
-                    id,
-                    session_id,
-                    CdpError::server(format!("Could not take a screenshot: {error:?}")),
-                );
-                return;
-            },
-            Err(_) => {
-                self.send_session_error(
-                    connection_id,
-                    id,
-                    session_id,
-                    CdpError::server("Taking a screenshot timed out"),
-                );
-                return;
-            },
-        };
-
-        let mut png_data = Cursor::new(Vec::new());
-        if let Err(error) =
-            DynamicImage::ImageRgba8(rgba_image).write_to(&mut png_data, ImageFormat::Png)
-        {
+        // Wait for the screenshot OFF the server mutex, for the same
+        // reason as `runtime_evaluate_in_pipeline`: rendering it needs a
+        // script thread that can run, and holding the mutex wedges exactly
+        // that thread on a page that logs to the console.
+        let id = id.clone();
+        let session_id = session_id.to_owned();
+        let spawned = thread::Builder::new()
+            .name("CdpScreenshotWaiter".to_owned())
+            .spawn({
+                let server = Arc::clone(server);
+                move || {
+                    let outcome = match result_receiver.recv_timeout(AUTOMATION_COMMAND_TIMEOUT) {
+                        Ok(Ok(rgba_image)) => {
+                            let mut png_data = Cursor::new(Vec::new());
+                            if let Err(error) = DynamicImage::ImageRgba8(rgba_image)
+                                .write_to(&mut png_data, ImageFormat::Png)
+                            {
+                                Err(CdpError::server(format!(
+                                    "Could not encode the screenshot: {error}"
+                                )))
+                            } else {
+                                Ok(json!({ "data": BASE64.encode(png_data.get_ref()) }))
+                            }
+                        },
+                        Ok(Err(error)) => Err(CdpError::server(format!(
+                            "Could not take a screenshot: {error:?}"
+                        ))),
+                        Err(_) => Err(CdpError::server("Taking a screenshot timed out")),
+                    };
+                    if let Ok(mut server) = server.lock() {
+                        match outcome {
+                            Ok(result) => {
+                                server.send_session_reply(connection_id, id, &session_id, result);
+                            },
+                            Err(error) => {
+                                server.send_session_error(connection_id, id, &session_id, error);
+                            },
+                        }
+                        server.flush();
+                    }
+                }
+            });
+        if spawned.is_err() {
             self.send_session_error(
                 connection_id,
                 id,
                 session_id,
-                CdpError::server(format!("Could not encode the screenshot: {error}")),
+                CdpError::server("Screenshot could not be scheduled"),
             );
-            return;
         }
-        self.send_session_reply(
-            connection_id,
-            id,
-            session_id,
-            json!({ "data": BASE64.encode(png_data.get_ref()) }),
-        );
     }
 
     /// Implements `Network.getResponseBody` from the response bodies that the
@@ -1490,6 +1550,7 @@ impl CdpServer {
     /// JSON-serialized arguments and evaluated in the context.
     fn runtime_call_function_on(
         &mut self,
+        server: &Arc<Mutex<CdpServer>>,
         connection_id: u64,
         id: Option<Value>,
         session_id: &str,
@@ -1554,6 +1615,7 @@ impl CdpServer {
             arguments = arguments.join(", ")
         );
         self.runtime_evaluate_in_pipeline(
+            server,
             connection_id,
             id,
             session_id,

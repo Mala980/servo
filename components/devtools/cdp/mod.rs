@@ -280,7 +280,10 @@ fn client_handler_loop(
                     println!("CDP: connection {connection_id} sent a malformed message");
                     continue;
                 };
-                server.lock().unwrap().handle_client_message(connection_id, &message);
+                server
+                    .lock()
+                    .unwrap()
+                    .handle_client_message(&server, connection_id, &message);
             },
             // Binary, ping and pong frames are handled by the receiver.
             Ok(Some(_)) => {},
