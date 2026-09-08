@@ -1337,7 +1337,11 @@ impl ScriptThread {
         // Bound how many events a single batch may gather: a page that
         // constantly schedules tasks (timers, SDK retries, ...) would
         // otherwise drain the task queue forever inside this loop and
-        // starve devtools messages, which CDP clients block on.
+        // starve devtools messages, which CDP clients block on. The cap
+        // also bounds how long an already-gathered batch executes, so
+        // keep it small: page tasks run under the SpiderMonkey Debugger
+        // API when devtools are attached and are an order of magnitude
+        // slower there.
         let mut gathered = 0usize;
 
         loop {
@@ -1384,7 +1388,7 @@ impl ScriptThread {
             // iteration and check for events. If there are no events pending, we'll move
             // on and execute the sequential events.
             gathered += 1;
-            if gathered >= 512 {
+            if gathered >= 64 {
                 // Whatever is still queued stays there and is picked up by
                 // the next handle_msgs call.
                 break;

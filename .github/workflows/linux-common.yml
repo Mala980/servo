@@ -503,21 +503,30 @@ jobs:
             pkill -f "remote-debugging-port $port" 2>/dev/null || true
             sleep 1
             local start_ts=$(date +%s)
-            timeout 1800 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
+            timeout 2400 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
               --remote-debugging-listen-address 127.0.0.1 about:blank \
               > "smoke-out/site-$mode-server.log" 2>&1 &
             pid=$!
             timeout 900 python3 .github/scripts/cdp_site_test.py "$mode" "$port" || failed=1
-            # The first attempt runs while the servo event loop is young and every
-            # CDP WebSocket created that early stalls permanently (kernel socket
-            # queues stay empty: bytes are delivered but the connection never
-            # recovers). A mature connection is proven to work by the functional
-            # test, so reconnect to the SAME server once the event loop is >= 100s old.
+            # The first attempt runs while the servo event loop is young, and
+            # the pages it loaded keep spamming timers forever afterwards,
+            # poisoning the shared browser state for a second pass. Restart
+            # the browser fresh and only retry once it is mature (>= 100s
+            # old) - the state the functional test proves works.
             if [ "$failed" = "1" ]; then
-              ELAPSED=$(( $(date +%s) - start_ts ))
-              WAIT=$(( ELAPSED < 100 ? 100 - ELAPSED + 5 : 5 ))
-              echo "### RECONNECT-RETRY ($mode): waiting ${WAIT}s for a mature event loop"
-              sleep $WAIT
+              echo "### RECONNECT-RETRY ($mode): restarting servo for a clean, mature server"
+              kill $pid 2>/dev/null || true
+              pkill -f "remote-debugging-port $port" 2>/dev/null || true
+              sleep 2
+              start_ts=$(date +%s)
+              timeout 2400 xvfb-run -a "$BIN" $extra -f --remote-debugging-port "$port" \
+                --remote-debugging-listen-address 127.0.0.1 about:blank \
+                > "smoke-out/site-$mode-server-retry.log" 2>&1 &
+              pid=$!
+              REMAIN=$(( 100 - $(date +%s) + start_ts ))
+              if [ "$REMAIN" -lt 5 ]; then REMAIN=5; fi
+              echo "### RECONNECT-RETRY ($mode): waiting ${REMAIN}s for the fresh server to mature"
+              sleep $REMAIN
               failed=0
             timeout 900 python3 .github/scripts/cdp_site_test.py "$mode" "$port" || failed=1
             fi
