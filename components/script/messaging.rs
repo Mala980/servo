@@ -514,6 +514,13 @@ impl ScriptThreadReceivers {
         }
     }
 
+    /// Try to receive a devtools command without touching the other
+    /// receivers. Used to drain commands between batch items: their
+    /// senders (CDP clients, the devtools server) block on the reply.
+    pub(crate) fn try_recv_devtools(&self) -> Option<DevtoolScriptControlMsg> {
+        self.devtools_server_receiver.try_recv().ok().and_then(Result::ok)
+    }
+
     /// Try to receive a from any of the receivers of this [`ScriptThreadReceivers`] or the given
     /// [`TaskQueue`]. Return `None` if no messages are ready to be received.
     pub(crate) fn try_recv(

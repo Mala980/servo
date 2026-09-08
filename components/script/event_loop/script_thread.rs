@@ -1402,6 +1402,15 @@ impl ScriptThread {
         // Process the gathered events.
         debug!("Processing events.");
         for msg in sequential {
+            // Executing one batch item can take a long time (page tasks
+            // run under the SpiderMonkey Debugger API when devtools are
+            // attached). Devtools commands sent during that window sit in
+            // the receiver while their senders block on the reply, so
+            // drain them between items.
+            while let Some(devtools_msg) = self.receivers.try_recv_devtools() {
+                self.handle_msg_from_devtools(devtools_msg, cx);
+            }
+
             debug!("Processing event {:?}.", msg);
             let category = self.categorize_msg(&msg);
             let pipeline_id = msg.pipeline_id();
