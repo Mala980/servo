@@ -290,7 +290,11 @@ jobs:
           class WS:
               def __init__(self, url):
                   parts = urlsplit(url)
-                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=30)
+                  # Must exceed the server's 60s evaluation timeout: the
+                  # first evaluation can land in the about:blank pipeline
+                  # that the createTarget navigation is tearing down, and
+                  # the server only answers it with an error after 60s.
+                  self.s = socket.create_connection((parts.hostname, parts.port), timeout=90)
                   key = base64.b64encode(os.urandom(16)).decode()
                   self.s.sendall((
                       f"GET {parts.path} HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
