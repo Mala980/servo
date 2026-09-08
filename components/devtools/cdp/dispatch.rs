@@ -1167,7 +1167,7 @@ impl CdpServer {
             self.send_session_error(
                 connection_id,
                 id,
-                session_id,
+                &session_id,
                 CdpError::server("Evaluation could not be scheduled"),
             );
         }
@@ -1479,7 +1479,7 @@ impl CdpServer {
             self.send_session_error(
                 connection_id,
                 id,
-                session_id,
+                &session_id,
                 CdpError::server("Screenshot could not be scheduled"),
             );
         }
