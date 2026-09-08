@@ -1366,6 +1366,15 @@ impl ScriptThread {
                     .profile_event(ScriptThreadEventCategory::ExitFullscreen, Some(id), || {
                         self.handle_exit_fullscreen(id, cx);
                     }),
+                MixedMessage::FromDevtools(inner_msg) => {
+                    // A devtools command is client-driven and its sender
+                    // blocks on the reply. A page with an endless task
+                    // stream must not delay it until the end of the batch
+                    // (a 512-task batch of debugger-instrumented tasks can
+                    // take longer than the CDP evaluation timeout), so
+                    // handle it immediately.
+                    self.handle_msg_from_devtools(inner_msg, cx);
+                },
                 _ => {
                     sequential.push(event);
                 },
