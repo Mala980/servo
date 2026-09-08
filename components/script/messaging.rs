@@ -532,11 +532,14 @@ impl ScriptThreadReceivers {
                 .ok()?;
             return MixedMessage::FromConstellation(message).into();
         }
-        if let Ok(message) = task_queue.take_tasks_and_recv(fully_active) {
-            return MixedMessage::FromScript(message).into();
-        }
+        // Devtools commands are answered by this very thread and CDP
+        // clients block on those replies, so a page that constantly
+        // schedules tasks must not delay them behind its task stream.
         if let Ok(message) = self.devtools_server_receiver.try_recv() {
             return MixedMessage::FromDevtools(message.unwrap()).into();
+        }
+        if let Ok(message) = task_queue.take_tasks_and_recv(fully_active) {
+            return MixedMessage::FromScript(message).into();
         }
         if let Ok(message) = self.image_cache_receiver.try_recv() {
             return MixedMessage::FromImageCache(message).into();

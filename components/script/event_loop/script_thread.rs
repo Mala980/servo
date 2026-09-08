@@ -1334,6 +1334,12 @@ impl ScriptThread {
             &fully_active,
         );
 
+        // Bound how many events a single batch may gather: a page that
+        // constantly schedules tasks (timers, SDK retries, ...) would
+        // otherwise drain the task queue forever inside this loop and
+        // starve devtools messages, which CDP clients block on.
+        let mut gathered = 0usize;
+
         loop {
             debug!("Handling event: {event:?}");
 
@@ -1368,6 +1374,12 @@ impl ScriptThread {
             // If any of our input sources has an event pending, we'll perform another
             // iteration and check for events. If there are no events pending, we'll move
             // on and execute the sequential events.
+            gathered += 1;
+            if gathered >= 512 {
+                // Whatever is still queued stays there and is picked up by
+                // the next handle_msgs call.
+                break;
+            }
             match self.receivers.try_recv(&self.task_queue, &fully_active) {
                 Some(new_event) => event = new_event,
                 None => break,

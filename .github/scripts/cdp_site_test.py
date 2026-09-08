@@ -292,7 +292,7 @@ for i, site in enumerate(sites):
                     time.sleep(5)
         tid = (r or {}).get("result", {}).get("targetId")
         if not tid:
-            check(f"{name} createTarget", False, r.get("error") or r)
+            check(f"{name} createTarget", False, (r or {}).get("error") or r)
             continue
         sid = None
         for attempt in range(5):
