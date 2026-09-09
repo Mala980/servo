@@ -1123,8 +1123,8 @@ impl CdpServer {
         // control channel, so a page that logs to the console wedges the
         // script thread mid-send - and with it the evaluation this command
         // is waiting for - until the wait itself times out.
-        let id = id.clone();
-        let session_id = session_id.to_owned();
+        let waiter_id = id.clone();
+        let waiter_session_id = session_id.to_owned();
         let spawned = thread::Builder::new()
             .name("CdpEvalWaiter".to_owned())
             .spawn({
@@ -1150,13 +1150,18 @@ impl CdpServer {
                             Ok(result_json) => {
                                 server.send_session_reply(
                                     connection_id,
-                                    id,
-                                    &session_id,
+                                    waiter_id,
+                                    &waiter_session_id,
                                     result_json,
                                 );
                             },
                             Err(error) => {
-                                server.send_session_error(connection_id, id, &session_id, error);
+                                server.send_session_error(
+                                    connection_id,
+                                    waiter_id,
+                                    &waiter_session_id,
+                                    error,
+                                );
                             },
                         }
                         server.flush();
@@ -1167,7 +1172,7 @@ impl CdpServer {
             self.send_session_error(
                 connection_id,
                 id,
-                &session_id,
+                session_id,
                 CdpError::server("Evaluation could not be scheduled"),
             );
         }
@@ -1437,8 +1442,8 @@ impl CdpServer {
         // reason as `runtime_evaluate_in_pipeline`: rendering it needs a
         // script thread that can run, and holding the mutex wedges exactly
         // that thread on a page that logs to the console.
-        let id = id.clone();
-        let session_id = session_id.to_owned();
+        let waiter_id = id.clone();
+        let waiter_session_id = session_id.to_owned();
         let spawned = thread::Builder::new()
             .name("CdpScreenshotWaiter".to_owned())
             .spawn({
@@ -1465,10 +1470,20 @@ impl CdpServer {
                     if let Ok(mut server) = server.lock() {
                         match outcome {
                             Ok(result) => {
-                                server.send_session_reply(connection_id, id, &session_id, result);
+                                server.send_session_reply(
+                                    connection_id,
+                                    waiter_id,
+                                    &waiter_session_id,
+                                    result,
+                                );
                             },
                             Err(error) => {
-                                server.send_session_error(connection_id, id, &session_id, error);
+                                server.send_session_error(
+                                    connection_id,
+                                    waiter_id,
+                                    &waiter_session_id,
+                                    error,
+                                );
                             },
                         }
                         server.flush();
@@ -1479,7 +1494,7 @@ impl CdpServer {
             self.send_session_error(
                 connection_id,
                 id,
-                &session_id,
+                session_id,
                 CdpError::server("Screenshot could not be scheduled"),
             );
         }
