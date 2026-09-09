@@ -631,6 +631,15 @@ impl CdpServer {
                 let target_id_string = target.target_id_string.clone();
                 self.target_ids.remove(&target_id_string);
                 self.target_ids.insert(target_id_string.clone(), browsing_context_id);
+                // Sessions address the target by browsing-context id, so
+                // they must follow the migration too; a session left on the
+                // old id resolves to nothing after the move and every
+                // command on it reports a missing execution context.
+                for session in self.sessions.values_mut() {
+                    if session.target_id == old_bctx {
+                        session.target_id = browsing_context_id;
+                    }
+                }
                 target.current_pipeline = Some(pipeline_id);
                 target.title = page_info.title.clone();
                 target.url = page_info.url.to_string();

@@ -320,6 +320,7 @@ for i, site in enumerate(sites):
                 " url: String(location.href)})")
         metrics = None
         fallback = [False, ""]
+        exc_printed = False
         deadline = time.time() + 120
         while time.time() < deadline:
             if not fallback[0] and time.time() > deadline - 90:
@@ -347,6 +348,9 @@ for i, site in enumerate(sites):
                 if m.get("rs") == "complete" and m.get("url", "") != "about:blank":
                     metrics = m
                     break
+            elif not exc_printed:
+                exc_printed = True
+                print(f"EXC-PROBE {mode} {site}:", json.dumps(r)[:460], flush=True)
             time.sleep(2)
         if metrics:
             detail = ("JSON.stringify({els: document.getElementsByTagName('*').length,"
