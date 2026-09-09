@@ -15,8 +15,10 @@ use js::context::JSContext;
 use js::rust::wrappers2::JS_DefineDebuggerObject;
 use net_traits::ResourceThreads;
 use profile_traits::{mem, time};
+use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::HasOrigin;
 use script_bindings::reflector::DomObject;
+use script_bindings::settings_stack::run_a_script;
 use servo_base::generic_channel::{GenericCallback, GenericSender, channel};
 use servo_base::id::{Index, PipelineId, PipelineNamespaceId};
 use servo_constellation_traits::ScriptToConstellationSender;
@@ -34,8 +36,9 @@ use crate::dom::bindings::codegen::GenericBindings::DebuggerGlobalScopeBinding::
     DebuggerGlobalScopeMethods, NotifyNewSource, PipelineIdInit,
 };
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::{HashMapTracedValues, NoTrace};
 use crate::dom::bindings::utils::define_all_exposed_interfaces;
 use crate::dom::debugger::debuggerblackboxevent::DebuggerBlackboxEvent;
 use crate::dom::debugger::debuggerclearbreakpointevent::DebuggerClearBreakpointEvent;
@@ -76,6 +79,12 @@ pub(crate) struct DebuggerGlobalScope {
     pipeline_id: PipelineId,
     #[no_trace]
     origin: MutableOrigin,
+    /// Debuggee globals registered with this debugger, keyed by pipeline
+    /// id. `Runtime.evaluate` must behave as if it were called from the
+    /// debuggee itself, so `fire_eval` resolves the debuggee here and runs
+    /// the evaluation with it as the entry global (Location getters
+    /// compare the entry origin against the document origin).
+    debuggee_globals: DomRefCell<HashMapTracedValues<NoTrace<PipelineId>, Dom<GlobalScope>>>,
 }
 
 impl DebuggerGlobalScope {
@@ -124,6 +133,7 @@ impl DebuggerGlobalScope {
             eval_result_sender: RefCell::new(None),
             pipeline_id: debugger_pipeline_id,
             origin: MutableOrigin::new(ImmutableOrigin::new_opaque()),
+            debuggee_globals: DomRefCell::new(HashMapTracedValues::new()),
         });
         let global =
             DebuggerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(cx, &global.origin(), global);
@@ -182,6 +192,9 @@ impl DebuggerGlobalScope {
             event.fire(cx, self.upcast()),
             "Guaranteed by DebuggerAddDebuggeeEvent::new"
         );
+        self.debuggee_globals
+            .borrow_mut()
+            .insert(NoTrace(debuggee_pipeline_id), Dom::from_ref(debuggee_global));
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -216,10 +229,33 @@ impl DebuggerGlobalScope {
             frame_actor_id.map(|id| id.into()),
             eager,
         ));
-        assert!(
-            event.fire(cx, self.upcast()),
-            "Guaranteed by DebuggerEvalEvent::new"
-        );
+        // Web APIs compare the entry settings object against the relevant
+        // document (for example Location's same-origin-domain check), and
+        // without this the entry would stay on the debugger global, making
+        // every cross-origin lookup throw a SecurityError. CDP evaluations
+        // behave as if called from the debuggee, so run the dispatch with
+        // the debuggee as the entry global.
+        let debuggee_global = self
+            .debuggee_globals
+            .borrow()
+            .get(&NoTrace(debuggee_pipeline_id))
+            .map(|global| DomRoot::from_ref(&**global));
+        match debuggee_global {
+            Some(debuggee_global) => {
+                run_a_script::<crate::DomTypeHolder, _, _>(cx, &debuggee_global, |cx| {
+                    assert!(
+                        event.fire(cx, self.upcast()),
+                        "Guaranteed by DebuggerEvalEvent::new"
+                    );
+                });
+            },
+            None => {
+                assert!(
+                    event.fire(cx, self.upcast()),
+                    "Guaranteed by DebuggerEvalEvent::new"
+                );
+            },
+        }
     }
 
     pub(crate) fn fire_get_possible_breakpoints(
