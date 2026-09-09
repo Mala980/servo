@@ -179,6 +179,7 @@ impl DebuggerGlobalScope {
     ) {
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm;
+        let raw_debuggee_pipeline_id = debuggee_pipeline_id;
         let debuggee_pipeline_id =
             crate::dom::pipelineid::PipelineId::new(cx, self.upcast(), debuggee_pipeline_id);
         let event = DomRoot::upcast::<Event>(DebuggerAddDebuggeeEvent::new(
@@ -194,7 +195,7 @@ impl DebuggerGlobalScope {
         );
         self.debuggee_globals
             .borrow_mut()
-            .insert(NoTrace(debuggee_pipeline_id), Dom::from_ref(debuggee_global));
+            .insert(NoTrace(raw_debuggee_pipeline_id), Dom::from_ref(debuggee_global));
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -218,6 +219,7 @@ impl DebuggerGlobalScope {
         }
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm;
+        let raw_debuggee_pipeline_id = debuggee_pipeline_id;
         let debuggee_pipeline_id =
             crate::dom::pipelineid::PipelineId::new(cx, self.upcast(), debuggee_pipeline_id);
         let event = DomRoot::upcast::<Event>(DebuggerEvalEvent::new(
@@ -238,7 +240,7 @@ impl DebuggerGlobalScope {
         let debuggee_global = self
             .debuggee_globals
             .borrow()
-            .get(&NoTrace(debuggee_pipeline_id))
+            .get(&NoTrace(raw_debuggee_pipeline_id))
             .map(|global| DomRoot::from_ref(&**global));
         match debuggee_global {
             Some(debuggee_global) => {
