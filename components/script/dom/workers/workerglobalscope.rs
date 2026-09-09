@@ -1185,6 +1185,7 @@ impl WorkerGlobalScope {
                     cx,
                     code.into(),
                     id,
+                    Some(self.upcast()),
                     Some(self.worker_id()),
                     frame_actor_id,
                     eager,

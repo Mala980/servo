@@ -2244,10 +2244,17 @@ impl ScriptThread {
                     id,
                     code.len()
                 );
+                // The evaluation must run as if invoked from the debuggee
+                // itself: Web APIs compare the entry settings object against
+                // the relevant document (Location's same-origin-domain check
+                // above all). Resolve the active global for the pipeline
+                // directly from the document collection.
+                let debuggee_global = documents.find_global(id);
                 self.debugger_global.fire_eval(
                     cx,
                     code.into(),
                     id,
+                    debuggee_global,
                     None,
                     frame_actor_id,
                     eager,
