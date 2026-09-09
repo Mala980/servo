@@ -758,7 +758,7 @@ impl SharedWorkerGlobalScope {
                         cx,
                         code.into(),
                         id,
-                        Some(self.upcast()),
+                        Some(DomRoot::from_ref(self.upcast::<GlobalScope>())),
                         Some(self.upcast::<WorkerGlobalScope>().worker_id()),
                         frame_actor_id,
                         eager,
