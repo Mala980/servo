@@ -15,6 +15,7 @@ use js::context::JSContext;
 use js::rust::wrappers2::JS_DefineDebuggerObject;
 use net_traits::ResourceThreads;
 use profile_traits::{mem, time};
+use rustc_hash::FxHashMap;
 use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::HasOrigin;
 use script_bindings::reflector::DomObject;
@@ -38,7 +39,7 @@ use crate::dom::bindings::codegen::GenericBindings::DebuggerGlobalScopeBinding::
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::trace::{HashMapTracedValues, NoTrace};
+use crate::dom::bindings::trace::NoTrace;
 use crate::dom::bindings::utils::define_all_exposed_interfaces;
 use crate::dom::debugger::debuggerblackboxevent::DebuggerBlackboxEvent;
 use crate::dom::debugger::debuggerclearbreakpointevent::DebuggerClearBreakpointEvent;
@@ -84,7 +85,7 @@ pub(crate) struct DebuggerGlobalScope {
     /// debuggee itself, so `fire_eval` resolves the debuggee here and runs
     /// the evaluation with it as the entry global (Location getters
     /// compare the entry origin against the document origin).
-    debuggee_globals: DomRefCell<HashMapTracedValues<NoTrace<PipelineId>, Dom<GlobalScope>>>,
+    debuggee_globals: DomRefCell<FxHashMap<NoTrace<PipelineId>, Dom<GlobalScope>>>,
 }
 
 impl DebuggerGlobalScope {
@@ -133,7 +134,7 @@ impl DebuggerGlobalScope {
             eval_result_sender: RefCell::new(None),
             pipeline_id: debugger_pipeline_id,
             origin: MutableOrigin::new(ImmutableOrigin::new_opaque()),
-            debuggee_globals: DomRefCell::new(HashMapTracedValues::new()),
+            debuggee_globals: DomRefCell::new(FxHashMap::default()),
         });
         let global =
             DebuggerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(cx, &global.origin(), global);
