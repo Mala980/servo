@@ -2239,11 +2239,6 @@ impl ScriptThread {
                 )
             },
             DevtoolScriptControlMsg::Eval(code, id, frame_actor_id, eager, reply) => {
-                println!(
-                    "EVAL-TRACE: script thread got Eval for pipeline {:?} ({} bytes)",
-                    id,
-                    code.len()
-                );
                 // The evaluation must run as if invoked from the debuggee
                 // itself: Web APIs compare the entry settings object against
                 // the relevant document (Location's same-origin-domain check

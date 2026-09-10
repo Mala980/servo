@@ -398,9 +398,6 @@ function getPreview(obj, depth) {
 addEventListener("eval", event => {
     const { code, pipelineId, workerId, frameActorId } = event;
 
-    console.log("[EVAL-TRACE] debugger eval listener: codeLen=" + code.length +
-        " frameActor=" + (frameActorId ?? "none"));
-
     let frame;
     if (frameActorId) {
         frame = frameActorsToFrames.get(frameActorId);
@@ -408,8 +405,6 @@ addEventListener("eval", event => {
     let global = workerId !== undefined ?
         findKeyByValue(debuggeesToWorkerIds, workerId) :
         findDebuggeeByPipelineId(pipelineId);
-
-    console.log("[EVAL-TRACE] debuggee global resolved: " + (global !== undefined));
 
     if (global === undefined && !frame) {
         // Replying is essential: the remote-debugging server blocks until

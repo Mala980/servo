@@ -197,7 +197,6 @@ impl DebuggerGlobalScope {
         eager: bool,
         result_sender: GenericSender<EvaluateJSReply>,
     ) {
-        println!("EVAL-TRACE: fire_eval reached (debugger global)");
         if self.eval_result_sender.replace(Some(result_sender)).is_some() {
             // A previous evaluation never completed (its reply went to an
             // abandoned channel). Overwriting is the only way to keep the
@@ -578,7 +577,6 @@ impl DebuggerGlobalScopeMethods<crate::DomTypeHolder> for DebuggerGlobalScope {
             has_exception,
         };
 
-        println!("EVAL-TRACE: EvalResult handler sending reply back to devtools");
         let _ = sender.send(reply);
     }
 
