@@ -160,7 +160,14 @@ def cmd(method, params=None, session=None, timeout=30):
     ws.send(msg)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        payload = ws.recv_msg()
+        try:
+            payload = ws.recv_msg()
+        except (socket.timeout, TimeoutError):
+            # The socket carries a short settimeout for the connection
+            # phases; inside a command wait it must not abort before the
+            # command's own deadline (a slow windowed render can hold a
+            # screenshot for seconds).
+            continue
         if not payload.strip():
             continue
         reply = json.loads(payload)
