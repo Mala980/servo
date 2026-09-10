@@ -381,11 +381,63 @@ for i, site in enumerate(sites):
                       r.get("result", {}).get("result", {}).get("value"), flush=True)
             except (TimeoutError, EOFError, OSError):
                 pass
+        # A redirecting page (a domain migration, for example) can swap
+        # the document between the metrics eval and the screenshot; the
+        # capture's readiness wait then hangs on the interrupted
+        # navigation. Require the URL to be stable across two reads,
+        # adopting (and re-measuring) the new document if it changed.
+        if metrics:
+            prev_url = None
+            for _ in range(10):
+                try:
+                    r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True},
+                            session=sid, timeout=25)
+                except (TimeoutError, EOFError, OSError):
+                    time.sleep(1)
+                    continue
+                val = r.get("result", {}).get("result", {}).get("value")
+                if not val:
+                    time.sleep(1)
+                    continue
+                m2 = json.loads(val)
+                url = m2.get("url")
+                if m2.get("rs") == "complete" and url and url == prev_url:
+                    break
+                if m2.get("rs") == "complete" and url and prev_url not in (None, url):
+                    metrics.update(m2)
+                    try:
+                        r = cmd("Runtime.evaluate", {"expression": detail,
+                                                     "returnByValue": True},
+                                session=sid, timeout=70)
+                        val = r.get("result", {}).get("result", {}).get("value")
+                        if val:
+                            metrics.update(json.loads(val))
+                    except TimeoutError:
+                        pass
+                prev_url = url
+                time.sleep(1)
         check(f"{name} readyState complete", bool(metrics),
               json.dumps(metrics, ensure_ascii=False)[:280] if metrics else "timeout waiting for load")
         els = (metrics or {}).get("els", 0)
         check(f"{name} DOM elements >= 20", els >= 20, str(els))
-        r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=90)
+        # One retry: a capture that raced a navigation times out inside
+        # the browser, but by the time it does the document has long
+        # settled, so the second attempt goes through immediately.
+        r = None
+        for attempt in range(2):
+            try:
+                r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=90)
+                if r.get("result", {}).get("data"):
+                    break
+                print(f"SCREENSHOT-RETRY {mode} {name}: attempt {attempt + 1} "
+                      f"server error: {r.get('error')}", flush=True)
+            except (TimeoutError, EOFError, OSError) as e:
+                print(f"SCREENSHOT-RETRY {mode} {name}: attempt {attempt + 1} "
+                      f"failed: {e!r}", flush=True)
+                r = None
+            time.sleep(2)
+        if r is None:
+            raise TimeoutError("Page.captureScreenshot (both attempts failed)")
         data = r.get("result", {}).get("data")
         size = 0
         if data:
