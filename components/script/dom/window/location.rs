@@ -220,11 +220,27 @@ impl Location {
             // FIXME: We should still return the active document if it's same
             //        origin but not fully active. `WindowProxy::document`
             //        currently returns `None` in this case.
-            if let Some(document) = window_proxy.document().filter(|document| {
-                self.entry_settings_object()
-                    .origin()
-                    .same_origin_domain(&document.origin())
-            }) {
+            // Debugger evaluations (CDP `Runtime.evaluate`, the devtools
+            // console) run with the debugger global as the entry settings
+            // object no matter which realm the evaluation targets. Like
+            // other browsers' devtools, they may read cross-origin
+            // location information, so the entry-origin check does not
+            // apply to them.
+            let debugger_evaluation = self
+                .entry_settings_object()
+                .get_url()
+                .as_str()
+                .starts_with("about:internal/debugger");
+            let document = if debugger_evaluation {
+                window_proxy.document()
+            } else {
+                window_proxy.document().filter(|document| {
+                    self.entry_settings_object()
+                        .origin()
+                        .same_origin_domain(&document.origin())
+                })
+            };
+            if let Some(document) = document {
                 Ok(Some(document))
             } else {
                 Err(Error::Security("Location's relevant Document is not same origin-domain with the entry settings object's origin".to_string().into()))
