@@ -603,6 +603,15 @@ impl CdpServer {
         if worker_id.is_some() {
             return;
         }
+        // Subframes share the page's webview; letting their `NewGlobal`
+        // messages through would migrate the CDP page target onto the
+        // subframe's browsing context and point `current_pipeline` at e.g.
+        // a third-party iframe, so evaluations would land in the wrong
+        // document. CDP page targets always evaluate in the top-level
+        // document.
+        if !page_info.is_top_level_global {
+            return;
+        }
 
         let execution_context_id = self.next_execution_context_id;
         self.next_execution_context_id += 1;
