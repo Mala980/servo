@@ -30,7 +30,12 @@ use crate::cdp::{CdpServer, DomNodeRef, EVALUATE_TIMEOUT, chrome_major_version};
 
 /// How long to wait for the embedder to run a browser-level automation
 /// command (like taking a screenshot) before giving up.
-const AUTOMATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+// A screenshot needs every pipeline of the webview to report readiness
+// and then a quiet frame from the compositor. Under software rendering
+// (llvmpipe) with a busy, animating page in a visible window that can
+// legitimately take tens of seconds - far more than the same page needs
+// headless - so give the capture the same patience the client has.
+const AUTOMATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Methods of the `Emulation` domain that are accepted as no-ops so that
 /// clients observe Chrome-like behavior.

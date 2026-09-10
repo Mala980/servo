@@ -385,7 +385,7 @@ for i, site in enumerate(sites):
               json.dumps(metrics, ensure_ascii=False)[:280] if metrics else "timeout waiting for load")
         els = (metrics or {}).get("els", 0)
         check(f"{name} DOM elements >= 20", els >= 20, str(els))
-        r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=60)
+        r = cmd("Page.captureScreenshot", {"format": "png"}, session=sid, timeout=90)
         data = r.get("result", {}).get("data")
         size = 0
         if data:
