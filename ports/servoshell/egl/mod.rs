@@ -9,3 +9,5 @@ mod host_trait;
 mod log;
 #[cfg(target_env = "ohos")]
 mod ohos;
+#[cfg(target_os = "android")]
+mod servolog;

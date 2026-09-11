@@ -306,10 +306,20 @@ pub struct App {
 impl App {
     #[servo::servo_tracing::instrument(skip_all, name = "App::new", level = "info")]
     pub(super) fn new(init: AppInitOptions) -> Rc<Self> {
-        let mut servo_builder = ServoBuilder::default()
+        // Diagnostic build: `x-servolog:tail` renders the on-device log
+        // file, so the log can be read in the browser UI without adb.
+        let servo_builder = ServoBuilder::default()
             .opts(init.opts)
             .preferences(init.preferences.clone())
             .event_loop_waker(init.event_loop_waker.clone());
+        #[cfg(target_os = "android")]
+        let servo_builder = {
+            use servo::protocol_handler::ProtocolRegistry;
+            let mut protocol_registry = ProtocolRegistry::default();
+            let _ =
+                protocol_registry.register("x-servolog", super::servolog::ServoLogProtocolHandler);
+            servo_builder.protocol_registry(protocol_registry)
+        };
         let servo = servo_builder.build();
         #[cfg(feature = "webxr")]
         servo.register_webxr_registry(Box::new(XrDiscoveryWebXrRegistry::new(init.xr_discovery)));

@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use android_logger::{self, Config, FilterBuilder};
+use android_logger;
 use euclid::{Point2D, Rect, Scale, Size2D};
 use jni::errors::{Error, ThrowRuntimeExAndDefault};
 use jni::objects::{Global, JClass, JObject, JString, JValue, JValueOwned};
@@ -125,7 +125,7 @@ pub extern "C" fn Java_org_servo_servoview_JNIServo_init<'local>(
         // Note: Android debug logs are stripped from a release build.
         // debug!() will only show in a debug build. Use info!() if logs
         // should show up in adb logcat with a release build.
-        let filters = [
+        let mut module_filters: Vec<(String, log::LevelFilter)> = [
             "servo",
             "servoshell",
             "servoshell::egl:gl_glue",
@@ -137,23 +137,41 @@ pub extern "C" fn Java_org_servo_servoview_JNIServo_init<'local>(
             "servo_canvas::webgl_thread",
             "paint::paint",
             "servo_constellation::constellation",
-        ];
-        let mut filter_builder = FilterBuilder::new();
-        for &module in &filters {
-            filter_builder.filter_module(module, log::LevelFilter::Debug);
-        }
-        if let Some(log_str) = log_str {
+        ]
+        .iter()
+        .map(|module| (module.to_string(), log::LevelFilter::Debug))
+        .collect();
+        if let Some(log_str) = log_str.as_deref() {
             for module in log_str.split(',') {
-                filter_builder.filter_module(module, log::LevelFilter::Debug);
+                module_filters.push((module.to_string(), log::LevelFilter::Debug));
             }
         }
 
-        android_logger::init_once(
-            Config::default()
-                .with_max_level(log::LevelFilter::Debug)
-                .with_filter(filter_builder.build())
-                .with_tag("servoshell"),
-        );
+        // Diagnostic build: log to a file in the app's own external storage
+        // instead of logcat only, so the log can be read on the device
+        // (file manager, or the in-app `x-servolog:tail` page) without adb.
+        let log_path = external_files_dir(env, &context)
+            .or_else(|| app_files_dir(env, &context))
+            .map(|dir| {
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("servo-log.txt")
+            });
+        match log_path {
+            Ok(log_path) => {
+                super::servolog::init_file_logger(module_filters, log_path);
+                if let Some(path) = super::servolog::log_file_path() {
+                    info!("servo log file: {}", path.display());
+                }
+            },
+            Err(error) => {
+                android_logger::init_once(
+                    android_logger::Config::default()
+                        .with_max_level(log::LevelFilter::Debug)
+                        .with_tag("servoshell"),
+                );
+                error!("Could not determine a log file directory: {error:?}");
+            },
+        }
 
         // In production mode we don't redirect stdout / stderr, so any
         // panic messages would be lost without this hook.
@@ -166,9 +184,9 @@ pub extern "C" fn Java_org_servo_servoview_JNIServo_init<'local>(
 
         info!("init");
 
-        // We only redirect stdout and stderr for non-production builds, since it is
-        // only used for debugging purposes. This saves us one thread in production.
-        #[cfg(not(servo_production))]
+        // stdout and stderr carry output from native libraries and the Rust
+        // runtime; piping them into the logging sink means they also reach
+        // the diagnostic log file.
         if let Err(e) = super::log::redirect_stdout_and_stderr() {
             error!("Failed to redirect stdout and stderr to logcat due to: {e:?}");
         }
@@ -960,6 +978,75 @@ fn set_default_config_dir<'local>(
         .set(config_dir)
         .inspect_err(|path| warn!("Default config dir was already set to {path:?}"));
     Ok(())
+}
+
+/// The app's external files directory (`.../Android/data/<package>/files`),
+/// which is readable from the device's file manager or over USB. This is
+/// where the diagnostic log is written.
+fn external_files_dir(env: &mut Env<'_>, context: &JObject<'_>) -> Result<PathBuf, String> {
+    let package = env
+        .call_method(
+            context,
+            jni_str!("getPackageName"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .map_err(|error| format!("{error:?}"))?
+        .l()
+        .map_err(|error| format!("{error:?}"))?;
+    let package = JString::cast_local(env, package)
+        .map_err(|error| format!("{error:?}"))?
+        .try_to_string(env)
+        .map_err(|error| format!("{error:?}"))?;
+    let storage = env
+        .call_static_method(
+            jni_str!("android/os/Environment"),
+            jni_str!("getExternalStorageDirectory"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )
+        .map_err(|error| format!("{error:?}"))?
+        .l()
+        .map_err(|error| format!("{error:?}"))?;
+    let storage = java_file_to_path(env, &storage)?;
+    Ok(storage.join("Android").join("data").join(package).join("files"))
+}
+
+/// The app's internal files directory, used as the log destination when the
+/// external storage is unavailable.
+fn app_files_dir(env: &mut Env<'_>, context: &JObject<'_>) -> Result<PathBuf, String> {
+    let files_dir = env
+        .call_method(
+            context,
+            jni_str!("getFilesDir"),
+            jni_sig!("()Ljava/io/File;"),
+            &[],
+        )
+        .map_err(|error| format!("{error:?}"))?
+        .l()
+        .map_err(|error| format!("{error:?}"))?;
+    java_file_to_path(env, &files_dir)
+}
+
+fn java_file_to_path(env: &mut Env<'_>, file: &JObject<'_>) -> Result<PathBuf, String> {
+    if file.is_null() {
+        return Err("java.io.File was null".to_owned());
+    }
+    let path = env
+        .call_method(
+            file,
+            jni_str!("getAbsolutePath"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .map_err(|error| format!("{error:?}"))?
+        .l()
+        .map_err(|error| format!("{error:?}"))?;
+    let path = JString::cast_local(env, path)
+        .map_err(|error| format!("{error:?}"))?
+        .try_to_string(env)
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(PathBuf::from(path))
 }
 
 fn display_and_window_handle(
